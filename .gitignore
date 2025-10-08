@@ -65,6 +65,9 @@ typings/
 .env.local
 .env.production
 
+# Discord Bot Token
+Token.txt
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
