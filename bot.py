@@ -237,7 +237,7 @@ async def suggest(interaction: discord.Interaction, suggestion: str):
 @bot.tree.command(name="remindme", description="Set a reminder for yourself")
 @discord.app_commands.describe(
     message="What you want to be reminded about",
-    time="When to remind you (e.g., '10/08/25 14:30', '12/25/24 09:15')"
+    time="When to remind you (supports many formats: '10/08/2025 14:30', '2:30 PM', 'tomorrow', etc.)"
 )
 async def remindme(interaction: discord.Interaction, message: str, time: str):
     try:
@@ -246,10 +246,19 @@ async def remindme(interaction: discord.Interaction, message: str, time: str):
         
         if remind_time is None:
             await interaction.response.send_message(
-                "❌ Invalid time format. Please use mm/dd/yy HH:MM format.\n"
-                "Examples:\n"
-                "• '10/08/25 14:30'\n"
-                "• '12/25/24 09:15'", 
+                "❌ Invalid time format. Here are the supported formats:\n\n"
+                "**Date + Time:**\n"
+                "• `10/08/2025 14:30` (4-digit year)\n"
+                "• `10/08/25 14:30` (2-digit year)\n"
+                "• `10-08-2025 14:30` (dash format)\n"
+                "• `2025-10-08 14:30` (ISO format)\n\n"
+                "**Date Only:**\n"
+                "• `10/08/2025` (uses current time)\n"
+                "• `10/08/25`\n\n"
+                "**Time Only:**\n"
+                "• `14:30` (24-hour format)\n"
+                "• `2:30 PM` (12-hour format)\n"
+                "• `2:30PM`", 
                 ephemeral=True
             )
             return
@@ -279,20 +288,70 @@ async def remindme(interaction: discord.Interaction, message: str, time: str):
         )
 
 def parse_reminder_time(time_str):
-    """Parse mm/dd/yy HH:MM format into a datetime object"""
+    """Parse various date/time formats into a datetime object"""
     time_str = time_str.strip()
     now = datetime.now()
     
-    try:
-        # Handle mm/dd/yy HH:MM format
-        if '/' in time_str and len(time_str) >= 8:
-            # Try to parse mm/dd/yy HH:MM format
-            return datetime.strptime(time_str, "%m/%d/%y %H:%M")
+    # List of supported formats to try
+    formats = [
+        # 4-digit year formats
+        "%m/%d/%Y %H:%M",      # 10/08/2025 14:30
+        "%m-%d-%Y %H:%M",      # 10-08-2025 14:30
+        "%Y-%m-%d %H:%M",      # 2025-10-08 14:30
+        "%m/%d/%Y",            # 10/08/2025 (time defaults to current time)
+        "%m-%d-%Y",            # 10-08-2025
+        "%Y-%m-%d",            # 2025-10-08
         
-        return None
+        # 2-digit year formats (with smart year interpretation)
+        "%m/%d/%y %H:%M",      # 10/08/25 14:30
+        "%m-%d-%y %H:%M",      # 10-08-25 14:30
+        "%m/%d/%y",            # 10/08/25
+        "%m-%d-%y",            # 10-08-25
         
-    except ValueError:
-        return None
+        # Time-only formats (assumes today)
+        "%H:%M",               # 14:30
+        "%I:%M %p",            # 2:30 PM
+        "%I:%M%p",             # 2:30PM
+    ]
+    
+    for fmt in formats:
+        try:
+            parsed_time = datetime.strptime(time_str, fmt)
+            
+            # Handle 2-digit years with smart interpretation
+            if fmt.endswith('%y'):
+                current_year = now.year
+                year = parsed_time.year
+                
+                # Convert 2-digit year to 4-digit year
+                if year < 100:
+                    # Assume years 00-99 are 2000s (2000-2099)
+                    parsed_time = parsed_time.replace(year=year + 2000)
+                
+                # Ensure the year is not in the past
+                if parsed_time.year < current_year:
+                    # If the year is in the past, assume it's next century
+                    parsed_time = parsed_time.replace(year=parsed_time.year + 100)
+            
+            # Handle time-only formats (use current date)
+            if fmt in ["%H:%M", "%I:%M %p", "%I:%M%p"]:
+                parsed_time = parsed_time.replace(year=now.year, month=now.month, day=now.day)
+            
+            # If no time was specified, use current time
+            if fmt in ["%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d", "%m/%d/%y", "%m-%d-%y"]:
+                parsed_time = parsed_time.replace(hour=now.hour, minute=now.minute)
+            
+            # Ensure 4-digit years are not in the past
+            if parsed_time.year < now.year:
+                # If the year is in the past, assume it's next century
+                parsed_time = parsed_time.replace(year=parsed_time.year + 100)
+            
+            return parsed_time
+            
+        except ValueError:
+            continue
+    
+    return None
 
 
 # Signal handler for graceful shutdown
