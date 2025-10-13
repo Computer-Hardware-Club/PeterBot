@@ -3,4 +3,32 @@ __pycache__/
 *.pyc
 venv/
 .env.local
+.venv/
+env/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# macOS
+.DS_Store
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Node (present due to package.json)
 node_modules/
+
+# Runtime/local data
+reminders.json
+bot_shutdown.json

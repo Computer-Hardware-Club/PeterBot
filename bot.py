@@ -7,6 +7,8 @@ import signal  # Signal handling for graceful bot shutdown
 import sys  # System-specific parameters and functions for exit handling
 from datetime import datetime, timedelta  # Date and time manipulation for reminders
 from dotenv import load_dotenv  # Load environment variables from .env file
+import aiohttp  # HTTP client for calling Ollama
+import re  # Regex for stripping <think> blocks
 
 #define intents
 intents = discord.Intents.default()
@@ -18,6 +20,86 @@ load_dotenv()
 
 #create bot instance
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Ollama / Peter configuration
+OLLAMA_BASE_URL = os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')
+OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'llama3.1')
+PETER_NAME = os.getenv('PETER_NAME', 'Peter')
+PETER_SYSTEM_PROMPT = os.getenv('PETER_SYSTEM_PROMPT')
+
+http_session = None
+
+# Optional: control model-side thinking output if supported by the model/server
+OLLAMA_THINK = os.getenv('OLLAMA_THINK', 'false').lower() in ('1', 'true', 'yes', 'on')
+
+async def ensure_http_session():
+    global http_session
+    if http_session is None or http_session.closed:
+        http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=90))
+
+def strip_think_blocks(text: str) -> str:
+    """Remove <think>...</think> blocks if present (case-insensitive, multiline)."""
+    if not text:
+        return text
+    try:
+        cleaned = re.sub(r"<\s*think\b[^>]*>[\s\S]*?<\s*/\s*think\s*>", "", text, flags=re.IGNORECASE)
+        return cleaned.strip()
+    except Exception:
+        return text
+
+async def call_ollama_chat(prompt_text, author_name=None, guild_name=None, channel_name=None):
+    """Call Ollama /api/chat and return assistant content or an error string."""
+    await ensure_http_session()
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+
+    context_bits = []
+    if guild_name:
+        context_bits.append(f"Server: {guild_name}")
+    if channel_name:
+        context_bits.append(f"Channel: #{channel_name}")
+    if author_name:
+        context_bits.append(f"User: {author_name}")
+    context_line = (" (" + ", ".join(context_bits) + ")") if context_bits else ""
+
+    # Append '/no_think' inline (not at start of a line) per Reddit guidance for Qwen3
+    # Avoid duplication if user already included it
+    if "/no_think" not in prompt_text:
+        prompt_text = f"{prompt_text.rstrip()} /no_think"
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "stream": False,
+        "options": {
+            # Some models (e.g., Qwen reasoning variants) honor a 'think' flag
+            "think": OLLAMA_THINK,
+        },
+        "messages": [
+            {
+                "role": "system",
+                "content": f"{PETER_SYSTEM_PROMPT}\n\nYour name is {PETER_NAME}.{context_line}\nDo not include <think> tags or chain-of-thought. Provide only the final answer.",
+            },
+            {
+                "role": "user",
+                "content": prompt_text,
+            },
+        ],
+    }
+
+    try:
+        async with http_session.post(url, json=payload) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                return f"Sorry, I couldn't reach the model (HTTP {resp.status})."
+            data = await resp.json()
+            msg = data.get("message", {})
+            content = msg.get("content")
+            if not content:
+                # Some older servers return just 'response'
+                content = data.get("response")
+            content = strip_think_blocks(content)
+            return content or "(No response from model)"
+    except Exception as e:
+        return f"Sorry, my brain (LLM) is unavailable right now. ({e})"
 
 # Reminder system
 class ReminderManager:
@@ -184,6 +266,41 @@ async def on_ready():
     reminder_checker.start()
 
 @bot.event
+async def on_message(message: discord.Message):
+    # Ignore self and bots
+    if message.author.bot:
+        return
+
+    # Only act when bot is mentioned
+    mentioned_ids = [m.id for m in message.mentions]
+    if bot.user and bot.user.id in mentioned_ids:
+        # Build the prompt by removing the mention text
+        mention_str = f"<@{bot.user.id}>"
+        mention_nick_str = f"<@!{bot.user.id}>"  # Discord sometimes includes '!'
+        content = message.content.replace(mention_str, '').replace(mention_nick_str, '').strip()
+        if not content:
+            content = "Hello! How can I help?"
+
+        try:
+            reply = await call_ollama_chat(
+                prompt_text=content,
+                author_name=message.author.display_name,
+                guild_name=message.guild.name if message.guild else None,
+                channel_name=message.channel.name if isinstance(message.channel, discord.TextChannel) else None,
+            )
+
+            # Keep replies reasonably short to avoid flooding
+            if reply and len(reply) > 1800:
+                reply = reply[:1800] + "…"
+
+            await message.reply(reply or "(No response)")
+        except Exception as e:
+            await message.reply(f"There was an error talking to the model: {e}")
+
+    # Allow commands to still work
+    await bot.process_commands(message)
+
+@bot.event
 async def on_disconnect():
     print("Bot is disconnecting...")
     reminder_manager.save_shutdown_time()
@@ -216,6 +333,26 @@ async def reminder_checker():
 @bot.tree.command(name="hello", description="Say hello to the bot")
 async def hello(interaction: discord.Interaction):
     await interaction.response.send_message('Hello!', ephemeral=True)
+
+# Slash command to query Peter via Ollama
+@bot.tree.command(name="ask", description="Ask Peter (Ollama) a question")
+@discord.app_commands.describe(prompt="Your question or prompt for Peter")
+async def ask(interaction: discord.Interaction, prompt: str):
+    try:
+        await interaction.response.defer(ephemeral=True)
+        reply = await call_ollama_chat(
+            prompt_text=prompt,
+            author_name=interaction.user.display_name,
+            guild_name=interaction.guild.name if interaction.guild else None,
+            channel_name=interaction.channel.name if hasattr(interaction.channel, 'name') else None,
+        )
+        if reply and len(reply) > 1800:
+            reply = reply[:1800] + "…"
+        await interaction.followup.send(reply or "(No response)", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"There was an error talking to the model: {e}", ephemeral=True)
+
+# (sync command removed by request)
 
 # Slash command for suggestions
 @bot.tree.command(name="suggest", description="Submit a suggestion to improve the bot")
