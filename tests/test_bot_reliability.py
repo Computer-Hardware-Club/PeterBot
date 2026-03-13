@@ -475,6 +475,14 @@ def test_vague_mention_with_interleaved_recent_users_asks_for_clarification() ->
     assert bundle["conversation_history"] == []
 
 
+def test_add_no_think_suffix_is_skipped_when_thinking_is_allowed() -> None:
+    ns = load_definitions("add_no_think_suffix")
+    add_no_think_suffix = ns["add_no_think_suffix"]
+
+    assert add_no_think_suffix("Oliver: thoughts?", allow_thinking=True) == "Oliver: thoughts?"
+    assert add_no_think_suffix("Oliver: thoughts?") == "Oliver: thoughts? /no_think"
+
+
 def test_mention_prompt_assembly_marks_current_turn_and_freshness() -> None:
     ns = load_mention_context_defs()
     build_mention_context_bundle = ns["build_mention_context_bundle"]
@@ -571,3 +579,63 @@ def test_image_only_mention_builds_prompt_and_attaches_images_to_user_message() 
     assert prompt_text.startswith("What do you think about this?")
     assert "[attachments: case-photo.png]" in prompt_text
     assert messages[-1]["images"] == [base64.b64encode(b"abc123").decode("ascii")]
+
+
+def test_build_chat_messages_omits_no_think_suffix_when_thinking_enabled() -> None:
+    ns = load_definitions("add_no_think_suffix", "build_chat_messages")
+    build_chat_messages = ns["build_chat_messages"]
+
+    messages = build_chat_messages(
+        "what do you think about that",
+        author_name="Oliver",
+        conversation_history=[],
+        system_prompt="You are Peter.",
+        user_content="[Current message | now] Oliver: what do you think about that",
+        allow_thinking=True,
+    )
+
+    assert messages[-1]["content"] == "[Current message | now] Oliver: what do you think about that"
+
+
+def test_build_ollama_payload_uses_top_level_think_flag() -> None:
+    ns = load_definitions("build_ollama_payload")
+    build_ollama_payload = ns["build_ollama_payload"]
+
+    payload = build_ollama_payload(
+        "mini3",
+        [{"role": "user", "content": "hello"}],
+        think=True,
+    )
+
+    assert payload["model"] == "mini3"
+    assert payload["stream"] is False
+    assert payload["think"] is True
+    assert payload["messages"] == [{"role": "user", "content": "hello"}]
+    assert "options" not in payload
+
+
+def test_extract_ollama_response_content_hides_separate_thinking_field() -> None:
+    ns = load_definitions("strip_think_blocks", "extract_ollama_response_content")
+    extract_ollama_response_content = ns["extract_ollama_response_content"]
+
+    content = extract_ollama_response_content(
+        {
+            "message": {
+                "thinking": "hidden reasoning",
+                "content": "Visible answer",
+            }
+        }
+    )
+
+    assert content == "Visible answer"
+
+
+def test_extract_ollama_response_content_strips_inline_think_blocks() -> None:
+    ns = load_definitions("strip_think_blocks", "extract_ollama_response_content")
+    extract_ollama_response_content = ns["extract_ollama_response_content"]
+
+    content = extract_ollama_response_content(
+        {"message": {"content": "<think>hidden reasoning</think>\nVisible answer"}}
+    )
+
+    assert content == "Visible answer"

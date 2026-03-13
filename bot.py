@@ -181,13 +181,8 @@ PETER_SYSTEM_PROMPT = os.getenv(
     ),
 )
 
-# Optional: control model-side thinking output if supported by the model/server
-OLLAMA_THINK = os.getenv("OLLAMA_THINK", "false").lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+# Optional: allow model-side thinking while keeping the hidden reasoning out of replies.
+OLLAMA_THINK = parse_env_bool("OLLAMA_THINK", default=False)
 
 MAX_DISCORD_MESSAGE_CHARS = 1800
 REMINDER_RETRY_DELAY = timedelta(minutes=5)
@@ -1154,10 +1149,13 @@ def build_mention_context_bundle(
     }
 
 
-def add_no_think_suffix(text: str) -> str:
-    if "/no_think" in text:
+def add_no_think_suffix(text: str, *, allow_thinking: bool = False) -> str:
+    if allow_thinking or "/no_think" in text:
         return text
-    return f"{text.rstrip()} /no_think"
+    stripped = text.rstrip()
+    if not stripped:
+        return text
+    return f"{stripped} /no_think"
 
 
 def build_chat_messages(
@@ -1168,6 +1166,7 @@ def build_chat_messages(
     system_prompt: str,
     user_content: Optional[str] = None,
     user_images: Optional[List[str]] = None,
+    allow_thinking: bool = False,
 ) -> List[Dict[str, str]]:
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     if conversation_history:
@@ -1176,11 +1175,37 @@ def build_chat_messages(
     if user_content is None:
         user_content = f"{author_name}: {prompt_text}" if author_name else prompt_text
 
-    user_message: Dict[str, Any] = {"role": "user", "content": add_no_think_suffix(user_content)}
+    user_message: Dict[str, Any] = {
+        "role": "user",
+        "content": add_no_think_suffix(user_content, allow_thinking=allow_thinking),
+    }
     if user_images:
         user_message["images"] = user_images
     messages.append(user_message)
     return messages
+
+
+def build_ollama_payload(
+    model: str,
+    messages: List[Dict[str, Any]],
+    *,
+    think: bool = False,
+) -> Dict[str, Any]:
+    return {
+        "model": model,
+        "stream": False,
+        "think": think,
+        "messages": messages,
+    }
+
+
+def extract_ollama_response_content(data: Dict[str, Any]) -> Optional[str]:
+    msg = data.get("message", {}) if isinstance(data, dict) else {}
+    content = msg.get("content")
+    if not content:
+        # Some older servers return just 'response'
+        content = data.get("response") if isinstance(data, dict) else None
+    return strip_think_blocks(content)
 
 
 def resolve_data_directory(configured_dir: Optional[str] = None) -> str:
@@ -1270,16 +1295,14 @@ async def call_ollama_chat(
         system_prompt=resolved_system_prompt,
         user_content=user_content,
         user_images=user_images,
+        allow_thinking=OLLAMA_THINK,
     )
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "stream": False,
-        "options": {
-            "think": OLLAMA_THINK,
-        },
-        "messages": messages,
-    }
+    payload = build_ollama_payload(
+        OLLAMA_MODEL,
+        messages,
+        think=OLLAMA_THINK,
+    )
 
     log_with_context(
         logging.DEBUG,
@@ -1347,12 +1370,7 @@ async def call_ollama_chat(
                     )
 
                 data = await resp.json(content_type=None)
-                msg = data.get("message", {})
-                content = msg.get("content")
-                if not content:
-                    # Some older servers return just 'response'
-                    content = data.get("response")
-                content = strip_think_blocks(content)
+                content = extract_ollama_response_content(data)
                 return content or "(No response from model)"
     except asyncio.TimeoutError:
         debug_id = log_exception_with_context(

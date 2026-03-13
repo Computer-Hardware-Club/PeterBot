@@ -37,10 +37,10 @@ python3 bot.py
 ### Core behavior
 
 - `OLLAMA_BASE_URL` (default: `http://localhost:11434`): Ollama base URL.
-- `OLLAMA_MODEL` (default: `ministral-3:8b`): model used for chat.
+- `OLLAMA_MODEL` (default: `ministral-3:8b`): model used for chat. Set this to your Ollama alias, for example `mini3`.
 - `PETER_NAME` (default: `Peter`): name injected into system prompt.
 - `PETER_SYSTEM_PROMPT`: overrides default persona/system prompt.
-- `OLLAMA_THINK` (default: `false`): forwarded to Ollama `options.think`.
+- `OLLAMA_THINK` (default: `false`): forwarded to Ollama's top-level `think` flag. When enabled, Peter lets the model use hidden reasoning but only sends the final answer back to Discord.
 - `SUGGESTION_CHANNEL_ID`: channel ID for `/suggest`.
 
 ### Persistence
