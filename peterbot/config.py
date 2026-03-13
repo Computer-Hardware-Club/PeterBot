@@ -5,13 +5,26 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
 
 from .logging_utils import log_with_context, parse_env_bool
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def load_app_environment(
+    env_file: Path = ENV_FILE,
+    *,
+    override: bool = True,
+) -> bool:
+    return load_dotenv(dotenv_path=env_file, override=override)
+
+
+load_app_environment()
 
 DEFAULT_PETER_SYSTEM_PROMPT = (
     "You are Peter, the club bot for the Computer Hardware Club at Oregon State. "
@@ -45,6 +58,13 @@ def get_env_int(name: str) -> Optional[int]:
         return int(raw)
     except ValueError:
         return None
+
+
+def get_env_positive_int(name: str, default: int) -> int:
+    value = get_env_int(name)
+    if value is None or value <= 0:
+        return default
+    return value
 
 
 def resolve_data_directory(configured_dir: Optional[str] = None) -> str:
@@ -115,6 +135,7 @@ class AppConfig:
     recap_default_messages: int = 25
     recap_max_messages: int = 40
     reminder_retry_minutes: int = 5
+    ollama_timeout_seconds: int = 300
 
     @classmethod
     def from_env(cls) -> "AppConfig":
@@ -135,6 +156,7 @@ class AppConfig:
             data_dir=resolve_data_directory(),
             knowledge_file=normalize_optional_path(os.getenv("PETER_KNOWLEDGE_FILE")),
             channel_profiles_file=normalize_optional_path(os.getenv("PETER_CHANNEL_PROFILES_FILE")),
+            ollama_timeout_seconds=get_env_positive_int("OLLAMA_TIMEOUT_SECONDS", default=300),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_file=os.path.abspath(os.path.expanduser(os.getenv("LOG_FILE", "").strip()))
             if os.getenv("LOG_FILE", "").strip()

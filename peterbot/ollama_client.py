@@ -51,7 +51,7 @@ class OllamaChatClient:
 
     async def ensure_http_session(self) -> None:
         if self.http_session is None or self.http_session.closed:
-            timeout = aiohttp.ClientTimeout(total=90)
+            timeout = aiohttp.ClientTimeout(total=self.config.ollama_timeout_seconds)
             self.http_session = aiohttp.ClientSession(timeout=timeout)
 
     async def close(self) -> None:
@@ -104,6 +104,7 @@ class OllamaChatClient:
             history_count=len(conversation_history or []),
             user_image_count=len(user_images or []),
             mode=response_mode,
+            timeout_seconds=self.config.ollama_timeout_seconds,
         )
 
         try:

@@ -1,7 +1,13 @@
 import json
 from pathlib import Path
 
-from peterbot.config import AppConfig, ModelProfile, resolve_data_directory, resolve_model_profile
+from peterbot.config import (
+    AppConfig,
+    ModelProfile,
+    load_app_environment,
+    resolve_data_directory,
+    resolve_model_profile,
+)
 from peterbot.knowledge import build_knowledge_excerpt, load_channel_profiles, load_knowledge_chunks, rank_knowledge_chunks
 from peterbot.prompts import MENTION_MODE, build_context_line, build_system_prompt, cleanup_response_text
 
@@ -34,6 +40,49 @@ def build_config(tmp_path) -> AppConfig:
 def test_resolve_model_profile_auto_prefers_qwen() -> None:
     assert resolve_model_profile("auto", "qwen3.5:14b") == ModelProfile.QWEN
     assert resolve_model_profile("auto", "ministral-3:8b") == ModelProfile.GENERIC
+
+
+def test_load_app_environment_uses_repo_env_file_values_over_stale_env(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("OLLAMA_TIMEOUT_SECONDS=1800\n", encoding="utf-8")
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "90")
+
+    load_app_environment(env_file, override=True)
+
+    assert AppConfig.from_env().ollama_timeout_seconds == 1800
+
+
+def test_app_config_reads_ollama_timeout_seconds_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "420")
+    monkeypatch.setenv("OLLAMA_OPTIONS_JSON", "{}")
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("PETER_NAME", raising=False)
+    monkeypatch.delenv("PETER_SYSTEM_PROMPT", raising=False)
+    monkeypatch.delenv("OLLAMA_THINK", raising=False)
+    monkeypatch.delenv("PETER_MODEL_PROFILE", raising=False)
+    monkeypatch.delenv("SUGGESTION_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("PETERBOT_DATA_DIR", raising=False)
+    monkeypatch.delenv("PETER_KNOWLEDGE_FILE", raising=False)
+    monkeypatch.delenv("PETER_CHANNEL_PROFILES_FILE", raising=False)
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.delenv("USER_DEBUG_IDS_ENABLED", raising=False)
+    monkeypatch.delenv("INCLUDE_TRACEBACK_FOR_WARNING", raising=False)
+
+    config = AppConfig.from_env()
+
+    assert config.ollama_timeout_seconds == 420
+
+
+def test_app_config_falls_back_to_default_timeout_when_invalid(monkeypatch) -> None:
+    monkeypatch.setenv("OLLAMA_TIMEOUT_SECONDS", "0")
+    monkeypatch.setenv("OLLAMA_OPTIONS_JSON", "{}")
+
+    config = AppConfig.from_env()
+
+    assert config.ollama_timeout_seconds == 300
 
 
 def test_resolve_data_directory_uses_env_var(tmp_path, monkeypatch) -> None:

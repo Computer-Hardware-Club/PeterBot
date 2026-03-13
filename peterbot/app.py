@@ -111,6 +111,7 @@ def run_bot() -> None:
         data_dir=config.data_dir,
         ollama_base_url=config.ollama_base_url,
         ollama_model=config.ollama_model,
+        ollama_timeout_seconds=config.ollama_timeout_seconds,
         ollama_think=config.ollama_think,
         model_profile=config.model_profile.value,
         user_debug_ids=config.user_debug_ids_enabled,

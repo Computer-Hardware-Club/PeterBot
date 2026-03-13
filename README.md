@@ -30,6 +30,8 @@ python3 -m pip install -r requirements-dev.txt
 python3 bot.py
 ```
 
+PeterBot loads `.env` from the repository root. Those values override stale inherited shell variables so local config changes take effect after a restart.
+
 ## Environment Variables
 
 ### Required
@@ -45,6 +47,7 @@ python3 bot.py
 - `OLLAMA_THINK` (default: `false`): forwarded to Ollama's top-level `think` flag. When enabled, Peter lets the model use hidden reasoning but only sends the final answer back to Discord.
 - `PETER_MODEL_PROFILE` (default: `auto`): one of `auto`, `generic`, or `qwen`. `auto` selects `qwen` whenever `OLLAMA_MODEL` contains `qwen`.
 - `OLLAMA_OPTIONS_JSON` (optional): JSON object forwarded to Ollama as `options`, for example `{"temperature":0.3}`.
+- `OLLAMA_TIMEOUT_SECONDS` (default: `300`): total time budget for each Ollama chat request. Increase this for slower local models such as larger Qwen variants.
 - `SUGGESTION_CHANNEL_ID`: channel ID for `/suggest`.
 - `PETER_KNOWLEDGE_FILE` (optional): Markdown file with `##` and `###` sections used as lightweight club knowledge.
 - `PETER_CHANNEL_PROFILES_FILE` (optional): JSON file keyed by channel name or channel ID with `tone`, `reply_length`, and `topics`.
