@@ -1,8 +1,16 @@
+# Environment/config
 .env
+.env.local
+.env.*
+!.env.example
+.envrc
+
+# Python cache/venv
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 venv/
-.env.local
 .venv/
 env/
 
@@ -10,25 +18,42 @@ env/
 build/
 dist/
 *.egg-info/
+pip-wheel-metadata/
+
+# Python tooling cache
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-coverage.xml
+.tox/
+.nox/
 
-# macOS
-.DS_Store
+# Coverage/reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
 
 # IDE/editor
 .vscode/
 .idea/
 
-# Logs
+# OS files
+.DS_Store
+
+# Logs/runtime diagnostics
 *.log
+*.log.*
+*.out
+*.err
+*.pid
+logs/
+debug/
 
 # Node (present due to package.json)
 node_modules/
 
-# Runtime/local data
+# Runtime/local bot data
 reminders.json
 bot_shutdown.json
+peterbot-data/
