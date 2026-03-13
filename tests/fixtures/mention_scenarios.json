@@ -1,0 +1,84 @@
+{
+  "recent_vague_turn": {
+    "prompt": "What do you think about that?",
+    "current_time": "2026-03-10T12:12:00",
+    "entries": [
+      {
+        "message_id": 10,
+        "author_id": 201,
+        "author_name": "Oliver",
+        "role": "user",
+        "content": "look how many periods this post has...",
+        "created_at": "2026-03-10T12:10:00",
+        "reply_to_message_id": null
+      },
+      {
+        "message_id": 11,
+        "author_id": 999,
+        "author_name": "Peter",
+        "role": "assistant",
+        "content": "that's an impressive number of dots",
+        "created_at": "2026-03-10T12:11:00",
+        "reply_to_message_id": 10
+      },
+      {
+        "message_id": 12,
+        "author_id": 202,
+        "author_name": "Mina",
+        "role": "user",
+        "content": "meeting parts budget got weird last night",
+        "created_at": "2026-03-10T10:15:00",
+        "reply_to_message_id": null
+      }
+    ]
+  },
+  "ambiguous_recent_turns": {
+    "prompt": "thoughts?",
+    "current_time": "2026-03-10T12:12:00",
+    "entries": [
+      {
+        "message_id": 21,
+        "author_id": 301,
+        "author_name": "Casey",
+        "role": "user",
+        "content": "this PSU upgrade is worth it",
+        "created_at": "2026-03-10T12:10:00",
+        "reply_to_message_id": null
+      },
+      {
+        "message_id": 22,
+        "author_id": 302,
+        "author_name": "Jordan",
+        "role": "user",
+        "content": "our music taste is better than the benchmark charts",
+        "created_at": "2026-03-10T12:11:00",
+        "reply_to_message_id": null
+      }
+    ]
+  },
+  "direct_reply": {
+    "prompt": "I think so too",
+    "current_time": "2026-03-10T13:00:00",
+    "entries": [
+      {
+        "message_id": 30,
+        "author_id": 401,
+        "author_name": "Nina",
+        "role": "user",
+        "content": "is the 5800x3d still worth it?",
+        "created_at": "2026-03-10T12:57:00",
+        "reply_to_message_id": null
+      },
+      {
+        "message_id": 31,
+        "author_id": 999,
+        "author_name": "Peter",
+        "role": "assistant",
+        "content": "yeah, if you already have AM4 it still rules",
+        "created_at": "2026-03-10T12:58:00",
+        "reply_to_message_id": 30
+      }
+    ],
+    "reply_target_message_id": 30
+  }
+}

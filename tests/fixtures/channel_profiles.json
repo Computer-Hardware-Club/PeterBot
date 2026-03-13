@@ -1,0 +1,12 @@
+{
+  "hardware-help": {
+    "tone": "practical, direct, low-fluff",
+    "reply_length": "short unless troubleshooting needs detail",
+    "topics": ["PC builds", "parts advice", "benchmarking"]
+  },
+  "1234": {
+    "tone": "casual club chatter",
+    "reply_length": "compact",
+    "topics": ["meeting reminders", "event planning"]
+  }
+}

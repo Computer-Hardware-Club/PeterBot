@@ -2,8 +2,10 @@
 
 Discord bot with:
 - mention-based chat responses via Ollama
-- `/ask`, `/suggest`, and `/remindme` slash commands
+- `/ask`, `/recap`, `/suggest`, and `/remindme` slash commands
 - reminder persistence across restarts
+- Qwen-oriented prompt shaping with model profiles and response cleanup
+- optional club knowledge and channel tone profiles
 - structured logging with user-facing debug IDs
 
 ## Requirements
@@ -37,17 +39,62 @@ python3 bot.py
 ### Core behavior
 
 - `OLLAMA_BASE_URL` (default: `http://localhost:11434`): Ollama base URL.
-- `OLLAMA_MODEL` (default: `ministral-3:8b`): model used for chat. Set this to your Ollama alias, for example `mini3`.
+- `OLLAMA_MODEL` (default: `qwen3.5`): model used for chat. Set this to your Ollama alias if needed.
 - `PETER_NAME` (default: `Peter`): name injected into system prompt.
-- `PETER_SYSTEM_PROMPT`: overrides default persona/system prompt.
+- `PETER_SYSTEM_PROMPT`: persona seed used by the layered prompt builder.
 - `OLLAMA_THINK` (default: `false`): forwarded to Ollama's top-level `think` flag. When enabled, Peter lets the model use hidden reasoning but only sends the final answer back to Discord.
+- `PETER_MODEL_PROFILE` (default: `auto`): one of `auto`, `generic`, or `qwen`. `auto` selects `qwen` whenever `OLLAMA_MODEL` contains `qwen`.
+- `OLLAMA_OPTIONS_JSON` (optional): JSON object forwarded to Ollama as `options`, for example `{"temperature":0.3}`.
 - `SUGGESTION_CHANNEL_ID`: channel ID for `/suggest`.
+- `PETER_KNOWLEDGE_FILE` (optional): Markdown file with `##` and `###` sections used as lightweight club knowledge.
+- `PETER_CHANNEL_PROFILES_FILE` (optional): JSON file keyed by channel name or channel ID with `tone`, `reply_length`, and `topics`.
 
 ### Persistence
 
 - `PETERBOT_DATA_DIR` (default: directory containing `bot.py`):
   directory for `reminders.json` and `bot_shutdown.json`.
   If new-path files do not exist, the bot attempts a one-time legacy read from current working directory.
+
+## Optional Local Config
+
+### Knowledge file
+
+Example `PETER_KNOWLEDGE_FILE`:
+
+```md
+## Meetings
+We meet every Thursday at 6:30 PM in the hardware lab.
+
+## Resources
+The club GitHub lives at https://github.com/Computer-Hardware-Club.
+```
+
+### Channel profile file
+
+Example `PETER_CHANNEL_PROFILES_FILE`:
+
+```json
+{
+  "hardware-help": {
+    "tone": "practical, direct, low-fluff",
+    "reply_length": "short unless troubleshooting needs detail",
+    "topics": ["PC builds", "parts advice", "benchmarking"]
+  },
+  "123456789012345678": {
+    "tone": "casual club chatter",
+    "reply_length": "compact",
+    "topics": ["meeting reminders", "event planning"]
+  }
+}
+```
+
+## Commands
+
+- Mention Peter in-channel to get a context-aware reply.
+- `/ask`: ask Peter a question using the latest channel context.
+- `/recap`: summarize the latest discussion into `What happened`, `Decisions`, and `Open questions`.
+- `/suggest`: send a suggestion to the configured suggestions channel.
+- `/remindme`: schedule a DM reminder.
 
 ### Logging and debugging
 
