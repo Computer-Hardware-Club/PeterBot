@@ -4,7 +4,7 @@ Discord bot with:
 - mention-based chat responses via Ollama
 - `/ask`, `/recap`, `/suggest`, and `/remindme` slash commands
 - reminder persistence across restarts
-- Qwen-oriented prompt shaping with model profiles and response cleanup
+- dry/direct club-bot prompting with model profiles and response cleanup
 - optional club knowledge and channel tone profiles
 - structured logging with user-facing debug IDs
 
@@ -41,7 +41,7 @@ python3 bot.py
 - `OLLAMA_BASE_URL` (default: `http://localhost:11434`): Ollama base URL.
 - `OLLAMA_MODEL` (default: `qwen3.5`): model used for chat. Set this to your Ollama alias if needed.
 - `PETER_NAME` (default: `Peter`): name injected into system prompt.
-- `PETER_SYSTEM_PROMPT`: persona seed used by the layered prompt builder.
+- `PETER_SYSTEM_PROMPT`: persona seed used by the layered prompt builder. Hard style rules still keep Peter in a dry/direct club-bot voice.
 - `OLLAMA_THINK` (default: `false`): forwarded to Ollama's top-level `think` flag. When enabled, Peter lets the model use hidden reasoning but only sends the final answer back to Discord.
 - `PETER_MODEL_PROFILE` (default: `auto`): one of `auto`, `generic`, or `qwen`. `auto` selects `qwen` whenever `OLLAMA_MODEL` contains `qwen`.
 - `OLLAMA_OPTIONS_JSON` (optional): JSON object forwarded to Ollama as `options`, for example `{"temperature":0.3}`.
@@ -148,3 +148,4 @@ python3 -m pytest -q
 
 - Runtime files (`reminders.json`, `bot_shutdown.json`, logs) are gitignored.
 - If reminders fail to deliver (for example DM permissions), delivery is retried for transient Discord errors and dropped for permanent permission errors.
+- Peter is meant to sound like a plain club bot, not a human server regular.

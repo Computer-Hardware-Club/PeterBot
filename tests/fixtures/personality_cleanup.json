@@ -1,0 +1,14 @@
+{
+  "identity_response": {
+    "raw": "I'm Peter, the club bot for the Computer Hardware Club at Oregon State. I answer questions about club stuff like meetings, membership, workshops, and related topics.\n\nHey Oliver - you got me with that one lol. Anything specific you wanted to know?",
+    "expected": "I'm Peter, the club bot for the Computer Hardware Club at Oregon State. I answer questions about club stuff like meetings, membership, workshops, and related topics."
+  },
+  "hello_response": {
+    "raw": "Hey, what's up?",
+    "expected": "Hi."
+  },
+  "mention_response": {
+    "raw": "The PSU swap makes sense for that build.\n\nlol yeah that's the move. Anything else?",
+    "expected": "The PSU swap makes sense for that build."
+  }
+}

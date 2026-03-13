@@ -1,4 +1,4 @@
-import logging
+import json
 from pathlib import Path
 
 from peterbot.config import AppConfig, ModelProfile, resolve_data_directory, resolve_model_profile
@@ -7,6 +7,7 @@ from peterbot.prompts import MENTION_MODE, build_context_line, build_system_prom
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+PERSONALITY_FIXTURES = json.loads((FIXTURES / "personality_cleanup.json").read_text(encoding="utf-8"))
 
 
 def build_config(tmp_path) -> AppConfig:
@@ -82,11 +83,15 @@ def test_build_system_prompt_layers_qwen_rules_channel_profile_and_knowledge(tmp
     )
 
     assert "Identity: Your name is Peter." in prompt
-    assert "Use 1-3 short paragraphs by default." in prompt
+    assert "You are the club bot or assistant, not a human member of the server." in prompt
+    assert "Use one short paragraph by default." in prompt
+    assert "Do not ask a follow up question unless clarification is actually required." in prompt
+    assert "Do not use hyphen, en dash, or em dash punctuation in normal reply prose." in prompt
     assert "Focused context: This is the immediate reply target." in prompt
     assert "Channel profile:" in prompt
     assert "Relevant club knowledge:" in prompt
     assert "We meet every Thursday at 6:30 PM" in prompt
+    assert "real person chatting" not in prompt
 
 
 def test_cleanup_response_text_strips_qwen_canned_phrasing() -> None:
@@ -104,3 +109,61 @@ def test_build_knowledge_excerpt_caps_large_sections() -> None:
     excerpt = build_knowledge_excerpt(chunks, max_chars=60)
     assert excerpt is not None
     assert len(excerpt) <= 60
+
+
+def test_cleanup_response_text_removes_fake_human_identity_tail() -> None:
+    fixture = PERSONALITY_FIXTURES["identity_response"]
+    cleaned = cleanup_response_text(fixture["raw"], profile=ModelProfile.QWEN)
+    assert cleaned == fixture["expected"]
+    assert "-" not in cleaned
+
+
+def test_cleanup_response_text_normalizes_simple_greeting() -> None:
+    fixture = PERSONALITY_FIXTURES["hello_response"]
+    assert cleanup_response_text(fixture["raw"], profile=ModelProfile.QWEN) == fixture["expected"]
+
+
+def test_cleanup_response_text_removes_social_second_paragraph() -> None:
+    fixture = PERSONALITY_FIXTURES["mention_response"]
+    assert cleanup_response_text(fixture["raw"], profile=ModelProfile.QWEN) == fixture["expected"]
+
+
+def test_cleanup_response_text_replaces_dashes_but_preserves_literals() -> None:
+    raw = "Read https://example.com/foo-bar and `my-file.py` for the follow-up - it explains the club-bot setup."
+    cleaned = cleanup_response_text(raw, profile=ModelProfile.QWEN)
+    assert "https://example.com/foo-bar" in cleaned
+    assert "`my-file.py`" in cleaned
+    assert "follow up" in cleaned
+    assert "club bot" in cleaned
+    assert " - " not in cleaned
+    assert "—" not in cleaned
+    assert "–" not in cleaned
+
+
+def test_custom_persona_seed_cannot_override_hard_style_rules(tmp_path) -> None:
+    config = AppConfig(
+        discord_token="token",
+        ollama_base_url="http://localhost:11434",
+        ollama_model="qwen3.5",
+        peter_name="Peter",
+        peter_system_prompt="You are Peter, a super warm best friend who acts human.",
+        ollama_think=False,
+        model_profile=ModelProfile.QWEN,
+        ollama_options={},
+        suggestion_channel_id=None,
+        data_dir=str(tmp_path),
+        knowledge_file=None,
+        channel_profiles_file=None,
+        log_level="INFO",
+        log_file="",
+        user_debug_ids_enabled=True,
+        include_traceback_for_warning=False,
+    )
+    prompt = build_system_prompt(
+        config,
+        build_context_line(author_name="Oliver", guild_name="CHC", channel_name="general"),
+        mode=MENTION_MODE,
+    )
+    assert "super warm best friend who acts human" in prompt
+    assert "You are the club bot or assistant, not a human member of the server." in prompt
+    assert "Do not ask a follow up question unless clarification is actually required." in prompt

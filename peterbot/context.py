@@ -917,9 +917,9 @@ def build_mention_focus_note(
     age_text = format_relative_age(target_entry.get("created_at"), current_time)
     reason_text = {
         "explicit_reply": "This is the direct reply target",
-        "immediate_previous_turn": "This is the immediately preceding human turn",
+        "immediate_previous_turn": "This is the immediately preceding user turn",
         "recent_peter_exchange": "This is the latest nearby Peter exchange",
-        "lexical_match_user_turn": "This is the recent human turn that best matches the current topic",
+        "lexical_match_user_turn": "This is the recent user turn that best matches the current topic",
         "lexical_match_recent_exchange": "This is the recent Peter exchange that best matches the current topic",
     }.get(selection_reason, "This is the best available focus target")
     return f"{reason_text}: {author_name} said it {age_text}."
