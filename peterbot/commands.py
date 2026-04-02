@@ -13,7 +13,6 @@ from .context import (
     build_recap_history,
     get_channel_context_messages,
     get_recent_channel_entries,
-    load_mention_image_payloads,
     resolve_reply_target_entry,
     safe_send_interaction_message,
     send_chunked_followup,
@@ -176,9 +175,9 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             "Bot connected to Discord gateway",
             bot_user=bot.user,
             data_dir=config.data_dir,
-            ollama_base_url=config.ollama_base_url,
-            ollama_model=config.ollama_model,
-            ollama_think=config.ollama_think,
+            inference_base_url=config.inference.base_url,
+            inference_model=config.inference.model,
+            bundled_llama_server=config.llama_server.enabled,
             model_profile=config.model_profile.value,
             knowledge_chunks=len(runtime.knowledge_index.chunks),
             channel_profiles=len(runtime.knowledge_index.channel_profiles),
@@ -226,11 +225,6 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                     bot_user_id=bot.user.id,
                     peter_name=config.peter_name,
                     max_chars=config.max_context_message_chars,
-                )
-                mention_images = await load_mention_image_payloads(
-                    message,
-                    limit=config.mention_image_limit,
-                    max_bytes=config.mention_max_image_bytes,
                 )
                 mention_bundle = build_mention_context_bundle(
                     message,
@@ -288,7 +282,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 )
 
                 async with message.channel.typing():
-                    reply = await runtime.ollama_client.call_chat(
+                    reply = await runtime.llm_client.call_chat(
                         prompt_text=content,
                         author_name=message.author.display_name,
                         guild_name=message.guild.name if message.guild else None,
@@ -296,7 +290,6 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                         conversation_history=mention_bundle["conversation_history"],
                         system_prompt=system_prompt,
                         user_content=mention_bundle["user_content"],
-                        user_images=mention_images,
                         response_mode=MENTION_MODE,
                     )
                 await send_chunked_reply(
@@ -380,7 +373,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
     async def hello(interaction: discord.Interaction) -> None:
         await interaction.response.send_message("Hello!", ephemeral=True)
 
-    @bot.tree.command(name="ask", description="Ask Peter (Ollama) a question")
+    @bot.tree.command(name="ask", description="Ask Peter a question")
     @discord.app_commands.describe(prompt="Your question or prompt for Peter")
     async def ask(interaction: discord.Interaction, prompt: str) -> None:
         try:
@@ -411,7 +404,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
 
             if hasattr(interaction.channel, "typing"):
                 async with interaction.channel.typing():
-                    reply = await runtime.ollama_client.call_chat(
+                    reply = await runtime.llm_client.call_chat(
                         prompt_text=prompt,
                         author_name=interaction.user.display_name,
                         guild_name=interaction.guild.name if interaction.guild else None,
@@ -421,7 +414,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                         response_mode=CHAT_MODE,
                     )
             else:
-                reply = await runtime.ollama_client.call_chat(
+                reply = await runtime.llm_client.call_chat(
                     prompt_text=prompt,
                     author_name=interaction.user.display_name,
                     guild_name=interaction.guild.name if interaction.guild else None,
@@ -490,7 +483,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 include_channel_profile=False,
                 include_knowledge=False,
             )
-            reply = await runtime.ollama_client.call_chat(
+            reply = await runtime.llm_client.call_chat(
                 prompt_text=f"Summarize the last {len(recent_entries)} messages in this channel.",
                 author_name=interaction.user.display_name,
                 guild_name=interaction.guild.name if interaction.guild else None,
@@ -531,7 +524,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
         if not suggestion_channel_id:
             await safe_send_interaction_message(
                 interaction,
-                "Suggestion channel is not configured. Please ask an admin to set `SUGGESTION_CHANNEL_ID`.",
+                "Suggestion channel is not configured. Please ask an admin to set `discord.suggestion_channel_id` in config.json.",
                 ephemeral=True,
             )
             return

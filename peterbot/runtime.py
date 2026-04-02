@@ -6,7 +6,7 @@ from typing import Any
 
 from .config import AppConfig
 from .knowledge import KnowledgeIndex
-from .ollama_client import OllamaChatClient
+from .llama_cpp_client import LlamaCppChatClient
 from .reminders import ReminderManager
 
 
@@ -14,7 +14,7 @@ from .reminders import ReminderManager
 class PeterBotRuntime:
     bot: Any
     config: AppConfig
-    ollama_client: OllamaChatClient
+    llm_client: LlamaCppChatClient
     reminder_manager: ReminderManager
     knowledge_index: KnowledgeIndex
     retry_delay: timedelta

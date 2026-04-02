@@ -3,7 +3,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from peterbot.commands import build_prompt_artifacts, clamp_recap_count
-from peterbot.config import AppConfig, ModelProfile
+from peterbot.config import (
+    AppConfig,
+    BehaviorConfig,
+    DiscordConfig,
+    InferenceConfig,
+    LlamaServerConfig,
+    LoggingConfig,
+    ModelProfile,
+    PathsConfig,
+    PersonaConfig,
+)
 from peterbot.context import build_recap_history
 from peterbot.knowledge import (
     load_knowledge_index,
@@ -67,21 +77,49 @@ def test_vague_prompt_does_not_pull_knowledge_from_channel_topics_alone() -> Non
 def test_recap_prompt_artifacts_skip_channel_profile_and_knowledge(tmp_path) -> None:
     config = AppConfig(
         discord_token="token",
-        ollama_base_url="http://localhost:11434",
-        ollama_model="qwen3.5",
-        peter_name="Peter",
-        peter_system_prompt="You are Peter.",
-        ollama_think=False,
-        model_profile=ModelProfile.QWEN,
-        ollama_options={},
-        suggestion_channel_id=None,
-        data_dir=str(tmp_path),
-        knowledge_file=str(FIXTURES / "club_knowledge.md"),
-        channel_profiles_file=str(FIXTURES / "channel_profiles.json"),
-        log_level="INFO",
-        log_file="",
-        user_debug_ids_enabled=True,
-        include_traceback_for_warning=False,
+        llama_cpp_api_key=None,
+        persona=PersonaConfig(
+            name="Peter",
+            system_prompt="You are Peter.",
+            model_profile=ModelProfile.QWEN,
+        ),
+        discord=DiscordConfig(suggestion_channel_id=None),
+        inference=InferenceConfig(
+            base_url="http://127.0.0.1:8080",
+            model="qwen3.5",
+            timeout_seconds=300,
+            max_tokens=512,
+            temperature=0.3,
+            top_p=None,
+            extra_request_body={},
+        ),
+        llama_server=LlamaServerConfig(
+            enabled=False,
+            model_path=None,
+            host="127.0.0.1",
+            port=8080,
+            ctx_size=4096,
+            threads=0,
+            batch_size=512,
+            parallel=1,
+            continuous_batching=True,
+            n_gpu_layers=0,
+            metrics=False,
+            extra_args=[],
+        ),
+        paths=PathsConfig(
+            data_dir=str(tmp_path),
+            knowledge_file=str(FIXTURES / "club_knowledge.md"),
+            channel_profiles_file=str(FIXTURES / "channel_profiles.json"),
+            log_file="",
+        ),
+        logging=LoggingConfig(
+            level="INFO",
+            user_debug_ids_enabled=True,
+            include_traceback_for_warning=False,
+        ),
+        behavior=BehaviorConfig(),
+        config_path=str(tmp_path / "config.json"),
     )
     knowledge_index = load_knowledge_index(
         knowledge_file=config.knowledge_file,

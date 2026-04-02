@@ -130,12 +130,8 @@ def build_system_prompt(
 
 
 def add_no_think_suffix(text: str, *, allow_thinking: bool = False) -> str:
-    if allow_thinking or "/no_think" in text:
-        return text
-    stripped = text.rstrip()
-    if not stripped:
-        return text
-    return f"{stripped} /no_think"
+    del allow_thinking
+    return text
 
 
 def build_chat_messages(

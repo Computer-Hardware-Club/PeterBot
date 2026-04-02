@@ -1,0 +1,48 @@
+services:
+  llama-cpp:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command:
+      - --model
+      - /models/peterbot.gguf
+      - --alias
+      - peterbot-gguf
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "4096"
+      - --batch-size
+      - "512"
+      - --parallel
+      - "1"
+      - --cont-batching
+    restart: unless-stopped
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "8080:8080"
+
+  peterbot:
+    build:
+      context: .
+      target: bot
+    depends_on:
+      - llama-cpp
+    env_file:
+      - path: ./.env
+        required: false
+    volumes:
+      - ./docker/config.sidecar.json:/app/config.json:ro
+      - ./peterbot-data:/app/peterbot-data
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import socket; socket.create_connection(("llama-cpp", 8080), 2).close()
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped

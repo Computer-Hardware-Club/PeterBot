@@ -1,68 +1,147 @@
 # PeterBot
 
 Discord bot with:
-- mention-based chat responses via Ollama
+- mention-based chat replies
 - `/ask`, `/recap`, `/suggest`, and `/remindme` slash commands
 - reminder persistence across restarts
-- dry/direct club-bot prompting with model profiles and response cleanup
 - optional club knowledge and channel tone profiles
+- Docker-first deployment with `llama.cpp`
 - structured logging with user-facing debug IDs
 
-## Requirements
+## Runtime Model
 
-- Python 3.9+
-- Discord bot token
-- Ollama server reachable from the bot process
+PeterBot now uses the `llama.cpp` HTTP server through its OpenAI-compatible chat API.
 
-## Setup
+Supported deployment modes:
+- `compose.sidecar.yml`: bot container + separate `llama.cpp` server container
+- `compose.bundled.yml`: one bot image that also includes `llama-server`
+- native local Python run: still supported for development and simple local use
 
-1. Install runtime dependencies:
+## Configuration
+
+### `config.json`
+
+All non-secret settings live in [`config.json`](/Users/ofhd/Developer/PeterBot/config.json).
+
+Sections:
+- `persona`: bot name, system prompt, model profile
+- `discord`: Discord-specific IDs such as `suggestion_channel_id`
+- `inference`: `llama.cpp` API base URL, model alias, request tuning
+- `llama_server`: local bundled server settings used when `enabled` is `true`
+- `paths`: persistent data, optional knowledge/profile files, log file
+- `logging`: log level and debug-id behavior
+- `behavior`: message/context limits and reminder retry tuning
+
+Relative paths in `config.json` resolve from the config file directory.
+
+### `.env`
+
+Only secrets belong in `.env`.
+
+Supported variables:
+- `DISCORD_TOKEN`: required
+- `LLAMA_CPP_API_KEY`: optional, only if your `llama.cpp` server requires Bearer auth
+- `PETERBOT_CONFIG_FILE`: optional override for the config file path
+
+Start from [`.env.example`](/Users/ofhd/Developer/PeterBot/.env.example).
+
+## Docker
+
+Docker is the primary deployment path.
+
+### 1. Prepare secrets
+
+```bash
+cp .env.example .env
+```
+
+Set at least:
+
+```env
+DISCORD_TOKEN=your-discord-token
+```
+
+### 2. Put a GGUF model in `./models`
+
+Both compose flows expect a mounted model directory:
+
+```bash
+mkdir -p models
+```
+
+Default example model path:
+
+```text
+./models/peterbot.gguf
+```
+
+If you use a different filename, update:
+- [`docker/config.sidecar.json`](/Users/ofhd/Developer/PeterBot/docker/config.sidecar.json)
+- [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json)
+- the `llama-cpp` command in [`compose.sidecar.yml`](/Users/ofhd/Developer/PeterBot/compose.sidecar.yml)
+
+### Sidecar mode
+
+Runs PeterBot and `llama.cpp` as separate containers.
+
+```bash
+docker compose -f compose.sidecar.yml up --build
+```
+
+Behavior:
+- `llama.cpp` serves the GGUF model from `./models`
+- PeterBot uses [`docker/config.sidecar.json`](/Users/ofhd/Developer/PeterBot/docker/config.sidecar.json)
+- bot state persists in `./peterbot-data`
+
+### Bundled mode
+
+Runs PeterBot in one container image that also includes `llama-server`.
+
+```bash
+docker compose -f compose.bundled.yml up --build
+```
+
+Behavior:
+- the image includes the `llama-server` binary
+- the GGUF model is still mounted from `./models`
+- PeterBot uses [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json)
+- the container launcher starts `llama-server`, waits for the local port, then starts the bot
+
+### Build targets
+
+Bot-only image:
+
+```bash
+docker build --target bot -t peterbot:bot .
+```
+
+Bundled image:
+
+```bash
+docker build --target bundled -t peterbot:bundled .
+```
+
+## Native Local Run
+
+Install dependencies:
+
 ```bash
 python3 -m pip install -r requirements.txt
 ```
-2. (Optional) Install development/test dependencies:
-```bash
-python3 -m pip install -r requirements-dev.txt
-```
-3. Create `.env` and configure at least `DISCORD_TOKEN`.
-4. Run the bot:
+
+Create `.env`, adjust [`config.json`](/Users/ofhd/Developer/PeterBot/config.json), and start the bot:
+
 ```bash
 python3 bot.py
 ```
 
-PeterBot loads `.env` from the repository root. Those values override stale inherited shell variables so local config changes take effect after a restart.
+For native local use with a separate `llama.cpp` server, set `inference.base_url` in `config.json` to the correct host and port and keep `llama_server.enabled` as `false`.
 
-## Environment Variables
-
-### Required
-
-- `DISCORD_TOKEN`: Discord bot token.
-
-### Core behavior
-
-- `OLLAMA_BASE_URL` (default: `http://localhost:11434`): Ollama base URL.
-- `OLLAMA_MODEL` (default: `qwen3.5`): model used for chat. Set this to your Ollama alias if needed.
-- `PETER_NAME` (default: `Peter`): name injected into system prompt.
-- `PETER_SYSTEM_PROMPT`: persona seed used by the layered prompt builder. Hard style rules still keep Peter in a dry/direct club-bot voice.
-- `OLLAMA_THINK` (default: `false`): forwarded to Ollama's top-level `think` flag. When enabled, Peter lets the model use hidden reasoning but only sends the final answer back to Discord.
-- `PETER_MODEL_PROFILE` (default: `auto`): one of `auto`, `generic`, or `qwen`. `auto` selects `qwen` whenever `OLLAMA_MODEL` contains `qwen`.
-- `OLLAMA_OPTIONS_JSON` (optional): JSON object forwarded to Ollama as `options`, for example `{"temperature":0.3}`.
-- `OLLAMA_TIMEOUT_SECONDS` (default: `300`): total time budget for each Ollama chat request. Increase this for slower local models such as larger Qwen variants.
-- `SUGGESTION_CHANNEL_ID`: channel ID for `/suggest`.
-- `PETER_KNOWLEDGE_FILE` (optional): Markdown file with `##` and `###` sections used as lightweight club knowledge.
-- `PETER_CHANNEL_PROFILES_FILE` (optional): JSON file keyed by channel name or channel ID with `tone`, `reply_length`, and `topics`.
-
-### Persistence
-
-- `PETERBOT_DATA_DIR` (default: directory containing `bot.py`):
-  directory for `reminders.json` and `bot_shutdown.json`.
-  If new-path files do not exist, the bot attempts a one-time legacy read from current working directory.
-
-## Optional Local Config
+## Optional Local Content
 
 ### Knowledge file
 
-Example `PETER_KNOWLEDGE_FILE`:
+Example `paths.knowledge_file`:
 
 ```md
 ## Meetings
@@ -74,7 +153,7 @@ The club GitHub lives at https://github.com/Computer-Hardware-Club.
 
 ### Channel profile file
 
-Example `PETER_CHANNEL_PROFILES_FILE`:
+Example `paths.channel_profiles_file`:
 
 ```json
 {
@@ -94,21 +173,20 @@ Example `PETER_CHANNEL_PROFILES_FILE`:
 ## Commands
 
 - Mention Peter in-channel to get a context-aware reply.
-- `/ask`: ask Peter a question using the latest channel context.
+- `/ask`: ask Peter a question using recent channel context.
 - `/recap`: summarize the latest discussion into `What happened`, `Decisions`, and `Open questions`.
 - `/suggest`: send a suggestion to the configured suggestions channel.
 - `/remindme`: schedule a DM reminder.
 
-### Logging and debugging
+## Logging and Debugging
 
-- `LOG_LEVEL` (default: `INFO`): standard Python logging level.
-- `LOG_FILE` (optional): if set, enables rotating file logs (5 MB, 5 backups).
-- `USER_DEBUG_IDS_ENABLED` (default: `true`): include debug IDs in user-facing error messages.
-- `INCLUDE_TRACEBACK_FOR_WARNING` (default: `false`): include traceback details for warning-level paths.
+Important config keys:
+- `logging.level`
+- `paths.log_file`
+- `logging.user_debug_ids_enabled`
+- `logging.include_traceback_for_warning`
 
-## Debugging Workflow
-
-When a user-facing failure occurs, the bot returns a debug ID like:
+When a user-facing failure occurs, the bot can return a debug ID like:
 
 ```text
 Debug ID: ERR-1a2b3c4d
@@ -120,35 +198,25 @@ Use that ID to search logs:
 rg "ERR-1a2b3c4d" -n .
 ```
 
-Recommended production logging setup:
+## Verification
+
+Syntax and tests:
 
 ```bash
-LOG_LEVEL=INFO
-LOG_FILE=./logs/peterbot.log
-USER_DEBUG_IDS_ENABLED=true
-INCLUDE_TRACEBACK_FOR_WARNING=false
-```
-
-Recommended local debugging setup:
-
-```bash
-LOG_LEVEL=DEBUG
-LOG_FILE=./logs/peterbot-debug.log
-USER_DEBUG_IDS_ENABLED=true
-INCLUDE_TRACEBACK_FOR_WARNING=true
-```
-
-## Testing
-
-Run syntax and tests:
-
-```bash
-python3 -m py_compile bot.py
+python3 -m py_compile bot.py peterbot/*.py
 python3 -m pytest -q
+```
+
+Docker config checks:
+
+```bash
+docker compose -f compose.sidecar.yml config
+docker compose -f compose.bundled.yml config
 ```
 
 ## Notes
 
-- Runtime files (`reminders.json`, `bot_shutdown.json`, logs) are gitignored.
-- If reminders fail to deliver (for example DM permissions), delivery is retried for transient Discord errors and dropped for permanent permission errors.
-- Peter is meant to sound like a plain club bot, not a human server regular.
+- Runtime data should stay on a mounted persistent volume or bind mount.
+- Bundled mode includes the `llama-server` binary, not the model weights.
+- Mention attachments are still represented in prompt text, but raw multimodal payloads are not forwarded in this `llama.cpp` migration.
+- Runtime files, `.env`, models, and local data dirs are gitignored.

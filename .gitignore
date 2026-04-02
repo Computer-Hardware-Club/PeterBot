@@ -50,10 +50,9 @@ junit.xml
 logs/
 debug/
 
-# Node (present due to package.json)
-node_modules/
-
 # Runtime/local bot data
 reminders.json
 bot_shutdown.json
 peterbot-data/
+models/
+config.local.json
