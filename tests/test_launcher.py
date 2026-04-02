@@ -2,6 +2,8 @@ import socket
 import threading
 from pathlib import Path
 
+import pytest
+
 from peterbot.config import (
     AppConfig,
     BehaviorConfig,
@@ -13,7 +15,13 @@ from peterbot.config import (
     PathsConfig,
     PersonaConfig,
 )
-from peterbot.launcher import build_llama_server_command, resolve_probe_host, wait_for_port
+from peterbot.launcher import (
+    build_llama_server_command,
+    main,
+    resolve_llama_server_binary,
+    resolve_probe_host,
+    wait_for_port,
+)
 
 
 def build_bundled_config(tmp_path: Path) -> AppConfig:
@@ -77,6 +85,40 @@ def test_build_llama_server_command_includes_expected_flags(tmp_path: Path) -> N
     assert "--metrics" in command
     assert "--cont-batching" in command
     assert "--n-gpu-layers" in command
+
+
+def test_resolve_llama_server_binary_prefers_packaged_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    packaged_binary = tmp_path / "llama-server"
+    packaged_binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    packaged_binary.chmod(0o755)
+
+    monkeypatch.setattr("peterbot.launcher.PACKAGED_LLAMA_SERVER_BINARY", packaged_binary)
+
+    assert resolve_llama_server_binary() == str(packaged_binary)
+
+
+def test_main_reports_clean_config_errors_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("peterbot.launcher.AppConfig.load", lambda: (_ for _ in ()).throw(ValueError("boom")))
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    assert "Configuration error: boom" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_reports_missing_bundled_binary_without_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("peterbot.launcher.AppConfig.load", lambda: build_bundled_config(tmp_path))
+    monkeypatch.setattr("peterbot.launcher.PACKAGED_LLAMA_SERVER_BINARY", tmp_path / "missing-llama-server")
+    monkeypatch.setattr("peterbot.launcher.shutil.which", lambda _name: None)
+
+    assert main() == 1
+    captured = capsys.readouterr()
+    assert "Configuration error: Bundled llama.cpp requires a packaged or installed 'llama-server' binary." in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_wait_for_port_detects_listening_socket() -> None:

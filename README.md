@@ -13,8 +13,9 @@ Discord bot with:
 PeterBot now uses the `llama.cpp` HTTP server through its OpenAI-compatible chat API.
 
 Supported deployment modes:
-- `compose.sidecar.yml`: bot container + separate `llama.cpp` server container
-- `compose.bundled.yml`: one bot image that also includes `llama-server`
+- default `docker compose` flow: one bot image that also includes `llama-server`
+- `compose.bundled.yml`: explicit compatibility alias for the bundled flow
+- `compose.sidecar.yml`: optional advanced mode with a separate `llama.cpp` server container
 - native local Python run: still supported for development and simple local use
 
 ## Configuration
@@ -41,13 +42,17 @@ Only secrets belong in `.env`.
 Supported variables:
 - `DISCORD_TOKEN`: required
 - `LLAMA_CPP_API_KEY`: optional, only if your `llama.cpp` server requires Bearer auth
-- `PETERBOT_CONFIG_FILE`: optional override for the config file path
+- `PETERBOT_CONFIG_FILE`: config file path, defaults to `/app/config.json` in Docker
 
 Start from [`.env.example`](/Users/ofhd/Developer/PeterBot/.env.example).
 
 ## Docker
 
 Docker is the primary deployment path.
+
+### Bundled Quick Start
+
+Bundled mode is the default and recommended deployment path. It starts PeterBot and the packaged `llama-server` together with plain `docker compose up --build`.
 
 ### 1. Prepare secrets
 
@@ -63,7 +68,7 @@ DISCORD_TOKEN=your-discord-token
 
 ### 2. Put a GGUF model in `./models`
 
-Both compose flows expect a mounted model directory:
+The repo does not ship model weights. Put your GGUF model in a local `./models` directory:
 
 ```bash
 mkdir -p models
@@ -75,14 +80,29 @@ Default example model path:
 ./models/peterbot.gguf
 ```
 
-If you use a different filename, update:
-- [`docker/config.sidecar.json`](/Users/ofhd/Developer/PeterBot/docker/config.sidecar.json)
-- [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json)
-- the `llama-cpp` command in [`compose.sidecar.yml`](/Users/ofhd/Developer/PeterBot/compose.sidecar.yml)
+If you use a different filename, update [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json). If you also use sidecar mode, update [`docker/config.sidecar.json`](/Users/ofhd/Developer/PeterBot/docker/config.sidecar.json) and the `llama-cpp` command in [`compose.sidecar.yml`](/Users/ofhd/Developer/PeterBot/compose.sidecar.yml).
 
-### Sidecar mode
+### 3. Start PeterBot
 
-Runs PeterBot and `llama.cpp` as separate containers.
+```bash
+docker compose up --build
+```
+
+Behavior:
+- the bundled image includes the `llama-server` binary
+- the GGUF model is mounted from `./models`
+- PeterBot uses [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json)
+- bot state persists in `./peterbot-data`
+
+`compose.bundled.yml` remains available as a compatibility alias if you want an explicit file:
+
+```bash
+docker compose -f compose.bundled.yml up --build
+```
+
+### Optional Advanced Sidecar Mode
+
+Use sidecar mode only if you intentionally want an external `llama.cpp` container.
 
 ```bash
 docker compose -f compose.sidecar.yml up --build
@@ -93,32 +113,18 @@ Behavior:
 - PeterBot uses [`docker/config.sidecar.json`](/Users/ofhd/Developer/PeterBot/docker/config.sidecar.json)
 - bot state persists in `./peterbot-data`
 
-### Bundled mode
-
-Runs PeterBot in one container image that also includes `llama-server`.
-
-```bash
-docker compose -f compose.bundled.yml up --build
-```
-
-Behavior:
-- the image includes the `llama-server` binary
-- the GGUF model is still mounted from `./models`
-- PeterBot uses [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json)
-- the container launcher starts `llama-server`, waits for the local port, then starts the bot
-
 ### Build targets
-
-Bot-only image:
-
-```bash
-docker build --target bot -t peterbot:bot .
-```
 
 Bundled image:
 
 ```bash
 docker build --target bundled -t peterbot:bundled .
+```
+
+Bot-only image for sidecar deployments:
+
+```bash
+docker build --target bot -t peterbot:latest .
 ```
 
 ## Native Local Run
@@ -210,9 +216,15 @@ python3 -m pytest -q
 Docker config checks:
 
 ```bash
+docker compose config
 docker compose -f compose.sidecar.yml config
-docker compose -f compose.bundled.yml config
 ```
+
+## Troubleshooting
+
+If the container exits immediately with `Configuration error: DISCORD_TOKEN is not set. Add it to .env.`, copy [`.env.example`](/Users/ofhd/Developer/PeterBot/.env.example) to `.env` and set `DISCORD_TOKEN`.
+
+If the bundled container exits immediately with `Configuration error: llama_server.model_path does not exist: /models/peterbot.gguf`, mount or place your GGUF model at `./models/peterbot.gguf` or update [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json) to match your filename.
 
 ## Notes
 

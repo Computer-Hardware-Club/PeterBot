@@ -4,6 +4,7 @@ import os
 import signal
 import socket
 import subprocess
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,22 @@ from typing import Optional
 from .config import AppConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PACKAGED_LLAMA_SERVER_BINARY = PROJECT_ROOT / "llama-server"
+
+
+def print_startup_error(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def resolve_llama_server_binary() -> str:
+    if PACKAGED_LLAMA_SERVER_BINARY.is_file():
+        return str(PACKAGED_LLAMA_SERVER_BINARY)
+    system_binary = shutil.which("llama-server")
+    if system_binary:
+        return system_binary
+    raise ValueError(
+        "Bundled llama.cpp requires a packaged or installed 'llama-server' binary."
+    )
 
 
 def build_llama_server_command(config: AppConfig, binary: str = "llama-server") -> list[str]:
@@ -109,13 +126,25 @@ def _wait_and_forward(bot_process: subprocess.Popen[bytes], server_process: Opti
 
 
 def main() -> int:
-    config = AppConfig.load()
+    try:
+        config = AppConfig.load()
+    except ValueError as exc:
+        print_startup_error(f"Configuration error: {exc}")
+        return 1
     env = os.environ.copy()
 
     server_process: Optional[subprocess.Popen[bytes]] = None
     if config.llama_server.enabled:
-        server_command = build_llama_server_command(config)
-        server_process = subprocess.Popen(server_command, cwd=PROJECT_ROOT, env=env)
+        try:
+            server_command = build_llama_server_command(config, binary=resolve_llama_server_binary())
+        except ValueError as exc:
+            print_startup_error(f"Configuration error: {exc}")
+            return 1
+        try:
+            server_process = subprocess.Popen(server_command, cwd=PROJECT_ROOT, env=env)
+        except OSError as exc:
+            print_startup_error(f"Bundled llama.cpp failed to start: {exc}")
+            return 1
         ready = wait_for_port(
             resolve_probe_host(config.llama_server.host),
             config.llama_server.port,
@@ -123,6 +152,7 @@ def main() -> int:
         )
         if not ready:
             terminate_process(server_process)
+            print_startup_error("Bundled llama.cpp did not become ready before timeout.")
             return 1
 
     bot_process = subprocess.Popen([sys.executable, "bot.py"], cwd=PROJECT_ROOT, env=env)
