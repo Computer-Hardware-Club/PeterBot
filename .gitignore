@@ -4,6 +4,7 @@
 .env.*
 !.env.example
 .envrc
+.omx/
 
 # Python cache/venv
 __pycache__/
