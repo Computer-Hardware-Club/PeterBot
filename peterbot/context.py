@@ -160,6 +160,11 @@ def is_image_attachment(attachment: Any) -> bool:
     return filename.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"))
 
 
+def message_has_image_attachments(message: Any) -> bool:
+    attachments = getattr(message, "attachments", None) or []
+    return any(is_image_attachment(attachment) for attachment in attachments)
+
+
 def build_current_mention_prompt_text(message: discord.Message, *, bot_user_id: Optional[int]) -> str:
     stripped_content = strip_bot_mentions(getattr(message, "content", "") or "", bot_user_id)
     attachments = getattr(message, "attachments", None) or []
@@ -173,7 +178,7 @@ def build_current_mention_prompt_text(message: discord.Message, *, bot_user_id: 
         return "\n".join(prompt_parts)
 
     if attachment_note:
-        if any(is_image_attachment(attachment) for attachment in attachments):
+        if message_has_image_attachments(message):
             return f"What do you think about this?\n{attachment_note}"
         return f"Can you take a look at this?\n{attachment_note}"
     return "Hello! How can I help?"

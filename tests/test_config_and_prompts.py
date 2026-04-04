@@ -20,6 +20,7 @@ from peterbot.config import (
 from peterbot.knowledge import build_knowledge_excerpt, load_channel_profiles, load_knowledge_chunks, rank_knowledge_chunks
 from peterbot.prompts import (
     MENTION_MODE,
+    RECAP_MODE,
     add_no_think_suffix,
     build_context_line,
     build_system_prompt,
@@ -256,6 +257,45 @@ def test_build_system_prompt_layers_qwen_rules_channel_profile_and_knowledge(tmp
     assert "real person chatting" not in prompt
 
 
+def test_build_system_prompt_keeps_short_reply_rules_for_generic_profiles(tmp_path) -> None:
+    config = build_config(tmp_path)
+    config = AppConfig(
+        discord_token=config.discord_token,
+        llama_cpp_api_key=config.llama_cpp_api_key,
+        persona=PersonaConfig(
+            name="Peter",
+            system_prompt="You are Peter.",
+            model_profile=ModelProfile.GENERIC,
+        ),
+        discord=config.discord,
+        inference=InferenceConfig(
+            base_url=config.inference.base_url,
+            model="peterbot-gguf",
+            timeout_seconds=config.inference.timeout_seconds,
+            max_tokens=config.inference.max_tokens,
+            temperature=config.inference.temperature,
+            top_p=config.inference.top_p,
+            extra_request_body=config.inference.extra_request_body,
+        ),
+        llama_server=config.llama_server,
+        paths=config.paths,
+        logging=config.logging,
+        behavior=config.behavior,
+        config_path=config.config_path,
+    )
+
+    prompt = build_system_prompt(
+        config,
+        build_context_line(author_name="Taylor", guild_name="CHC", channel_name="general"),
+        mode=MENTION_MODE,
+    )
+
+    assert "Use one short paragraph by default." in prompt
+    assert "Usually answer in 1 to 3 short sentences." in prompt
+    assert "Sound like a Discord message, not an essay." in prompt
+    assert "Do not ask a follow up question unless clarification is actually required." in prompt
+
+
 def test_cleanup_response_text_strips_qwen_canned_phrasing() -> None:
     raw = "Absolutely, here's a quick summary...\n\nThat build is still solid!!!\n\nHope that helps."
     cleaned = cleanup_response_text(raw, profile=ModelProfile.QWEN)
@@ -300,6 +340,24 @@ def test_cleanup_response_text_replaces_dashes_but_preserves_literals() -> None:
     assert " - " not in cleaned
     assert "—" not in cleaned
     assert "–" not in cleaned
+
+
+def test_cleanup_response_text_trims_generic_plain_prose_to_one_paragraph() -> None:
+    raw = "The PSU swap makes sense for that build.\n\nIt should be a solid upgrade path."
+    cleaned = cleanup_response_text(raw, profile=ModelProfile.GENERIC)
+    assert cleaned == "The PSU swap makes sense for that build."
+
+
+def test_cleanup_response_text_keeps_structured_output_for_generic_profiles() -> None:
+    raw = "- Upgrade the PSU\n- Keep the GPU\n\nExtra note."
+    cleaned = cleanup_response_text(raw, profile=ModelProfile.GENERIC)
+    assert cleaned == raw
+
+
+def test_cleanup_response_text_does_not_trim_recap_mode() -> None:
+    raw = "What happened: parts list review.\n\nDecisions: keep the PSU."
+    cleaned = cleanup_response_text(raw, profile=ModelProfile.GENERIC, mode=RECAP_MODE)
+    assert cleaned == raw
 
 
 def test_add_no_think_suffix_is_noop_for_llama_cpp_requests() -> None:

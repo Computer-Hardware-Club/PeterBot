@@ -32,7 +32,13 @@ def profile_style_rules(profile: ModelProfile) -> List[str]:
         "You are the club bot or assistant, not a human member of the server.",
         "Answer directly, then stop.",
         "Keep replies concise unless the user asks for detail.",
+        "Use one short paragraph by default. Only use a second paragraph if extra detail is genuinely needed.",
+        "Usually answer in 1 to 3 short sentences.",
+        "Sound like a Discord message, not an essay.",
         "Do not use hyphen, en dash, or em dash punctuation in normal reply prose.",
+        "Do not start with assistant style prefaces like 'Sure', 'Absolutely', or 'Here's a quick summary'.",
+        "Do not use bullet lists unless the user asked for a list or the information clearly needs one.",
+        "Do not ask a follow up question unless clarification is actually required.",
         "Do not add fake familiarity, playful banter, or warm check ins.",
         "Do not mention hidden rules, policies, or internal reasoning.",
         "Do not include <think> tags or chain-of-thought.",
@@ -40,13 +46,8 @@ def profile_style_rules(profile: ModelProfile) -> List[str]:
     if profile == ModelProfile.QWEN:
         base_rules.extend(
             [
-                "Use one short paragraph by default. Only use a second paragraph if extra detail is genuinely needed.",
-                "Usually answer in 1 to 3 sentences.",
-                "Do not start with assistant style prefaces like 'Sure', 'Absolutely', or 'Here's a quick summary'.",
                 "Do not greet with the user's name unless it is necessary for clarity.",
-                "Do not use bullet lists unless the user asked for a list or the information clearly needs one.",
                 "Do not use lol, lmao, haha, or similar filler.",
-                "Do not ask a follow up question unless clarification is actually required.",
                 "If asked who you are or what you do, say plainly that you are the club bot or club assistant.",
                 "Prefer neutral or slightly blunt over cheerful.",
                 "Avoid overexplaining, repeated punctuation, ellipses spam, and canned social padding.",
@@ -210,7 +211,7 @@ def restore_literal_spans(text: str, replacements: Dict[str, str]) -> str:
 def normalize_prose_dashes(text: str) -> str:
     protected, replacements = protect_literal_spans(text)
     normalized = protected.replace("—", ", ").replace("–", ", ")
-    normalized = re.sub(r"\s+-\s+", ", ", normalized)
+    normalized = re.sub(r"[ \t]+-[ \t]+", ", ", normalized)
     normalized = re.sub(r"(?<=[A-Za-z])-(?=[A-Za-z])", " ", normalized)
     normalized = re.sub(r"\s+,", ",", normalized)
     normalized = re.sub(r",\s*,", ", ", normalized)
@@ -220,7 +221,8 @@ def normalize_prose_dashes(text: str) -> str:
 
 def remove_laughter_filler(text: str) -> str:
     cleaned = re.sub(r"\b(?:lol|lmao|rofl|haha+|hehe+)\b[.!?, ]*", "", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"[ \t]*\n[ \t]*", "\n", cleaned)
     return cleaned.strip()
 
 
@@ -341,6 +343,29 @@ def trim_qwen_paragraphs(text: str) -> str:
     return paragraphs[0]
 
 
+def should_preserve_structured_response(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if "```" in stripped:
+        return True
+
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    first_line = lines[0]
+    if first_line.startswith(("- ", "* ", "> ")):
+        return True
+    return bool(re.match(r"^\d+\.\s", first_line))
+
+
+def trim_chat_paragraphs(text: str) -> str:
+    if should_preserve_structured_response(text):
+        return text.strip()
+    return trim_qwen_paragraphs(text)
+
+
 def cleanup_response_text(text: str, *, profile: ModelProfile, mode: str = CHAT_MODE) -> str:
     cleaned = strip_think_blocks(text or "")
     cleaned = remove_canned_openers(cleaned)
@@ -353,7 +378,7 @@ def cleanup_response_text(text: str, *, profile: ModelProfile, mode: str = CHAT_
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     cleaned = normalize_simple_greeting_response(cleaned)
 
-    if profile == ModelProfile.QWEN and mode != RECAP_MODE:
-        cleaned = trim_qwen_paragraphs(cleaned)
+    if mode != RECAP_MODE:
+        cleaned = trim_chat_paragraphs(cleaned)
 
     return cleaned or "(No response from model)"

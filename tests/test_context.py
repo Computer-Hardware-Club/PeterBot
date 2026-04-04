@@ -1,11 +1,15 @@
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import discord
+
 from peterbot.context import (
     build_current_mention_prompt_text,
     build_mention_context_bundle,
+    load_mention_image_payloads,
     prompt_requires_strong_target,
 )
 
@@ -156,3 +160,49 @@ def test_image_only_mention_builds_natural_prompt_and_attachment_note() -> None:
     prompt = build_current_mention_prompt_text(message, bot_user_id=999)
     assert prompt.startswith("What do you think about this?")
     assert "[attachments: case-photo.png]" in prompt
+
+
+def test_load_mention_image_payloads_skips_oversized_images() -> None:
+    class OversizedAttachment:
+        filename = "case-photo.png"
+        content_type = "image/png"
+        size = 20
+
+        async def read(self) -> bytes:
+            return b"x" * 20
+
+    message = SimpleNamespace(
+        attachments=[OversizedAttachment()],
+        id=1,
+        author=SimpleNamespace(id=2),
+        channel=SimpleNamespace(id=3),
+        guild=None,
+    )
+
+    payloads = asyncio.run(load_mention_image_payloads(message, limit=2, max_bytes=10))
+    assert payloads == []
+
+
+def test_load_mention_image_payloads_skips_unreadable_images() -> None:
+    class FakeResponse:
+        status = 500
+        reason = "bad request"
+
+    class UnreadableAttachment:
+        filename = "case-photo.png"
+        content_type = "image/png"
+        size = 8
+
+        async def read(self) -> bytes:
+            raise discord.HTTPException(FakeResponse(), "boom")
+
+    message = SimpleNamespace(
+        attachments=[UnreadableAttachment()],
+        id=1,
+        author=SimpleNamespace(id=2),
+        channel=SimpleNamespace(id=3),
+        guild=None,
+    )
+
+    payloads = asyncio.run(load_mention_image_payloads(message, limit=2, max_bytes=10))
+    assert payloads == []

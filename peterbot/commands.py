@@ -13,6 +13,8 @@ from .context import (
     build_recap_history,
     get_channel_context_messages,
     get_recent_channel_entries,
+    load_mention_image_payloads,
+    message_has_image_attachments,
     resolve_reply_target_entry,
     safe_send_interaction_message,
     send_chunked_followup,
@@ -36,6 +38,8 @@ from .prompts import (
 )
 from .reminders import check_missed_reminders, deliver_reminder, parse_reminder_time
 from .runtime import PeterBotRuntime
+
+IMAGE_ATTACHMENT_READ_FAILURE_MESSAGE = "I couldn't read the attached image. Try a smaller image or reupload it."
 
 
 def build_prompt_artifacts(
@@ -135,6 +139,33 @@ def clamp_recap_count(count: int, maximum: int) -> int:
     return max(5, min(count, maximum))
 
 
+async def resolve_mention_images(
+    message: discord.Message,
+    *,
+    image_limit: int,
+    max_image_bytes: int,
+) -> tuple[list[str], Optional[str]]:
+    if not message_has_image_attachments(message):
+        return [], None
+
+    images = await load_mention_image_payloads(
+        message,
+        limit=image_limit,
+        max_bytes=max_image_bytes,
+    )
+    if images:
+        return images, None
+
+    log_with_context(
+        logging.INFO,
+        "Mention included image attachments but none were usable",
+        image_limit=image_limit,
+        max_image_bytes=max_image_bytes,
+        **message_log_context(message),
+    )
+    return [], IMAGE_ATTACHMENT_READ_FAILURE_MESSAGE
+
+
 def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
     config = runtime.config
 
@@ -211,6 +242,20 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
         if bot.user and bot.user in message.mentions:
             content = build_current_mention_prompt_text(message, bot_user_id=bot.user.id)
             try:
+                mention_images, image_error = await resolve_mention_images(
+                    message,
+                    image_limit=config.mention_image_limit,
+                    max_image_bytes=config.mention_max_image_bytes,
+                )
+                if image_error:
+                    await send_chunked_reply(
+                        message,
+                        image_error,
+                        max_len=config.max_discord_message_chars,
+                    )
+                    await bot.process_commands(message)
+                    return
+
                 recent_entries = await get_recent_channel_entries(
                     message.channel,
                     bot_user_id=bot.user.id,
@@ -290,6 +335,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                         conversation_history=mention_bundle["conversation_history"],
                         system_prompt=system_prompt,
                         user_content=mention_bundle["user_content"],
+                        user_images=mention_images or None,
                         response_mode=MENTION_MODE,
                     )
                 await send_chunked_reply(

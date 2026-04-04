@@ -14,6 +14,7 @@ from peterbot.config import (
 )
 from peterbot.llama_cpp_client import (
     LlamaCppChatClient,
+    MULTIMODAL_SETUP_MESSAGE,
     build_chat_completion_payload,
     extract_chat_completion_content,
 )
@@ -100,3 +101,79 @@ def test_llama_cpp_client_sets_bearer_auth_header(tmp_path: Path) -> None:
         assert client.http_session.headers["Authorization"] == "Bearer secret-key"
     finally:
         asyncio.run(client.close())
+
+
+class FakeResponse:
+    def __init__(self, *, status: int, json_data=None, text_data: str = "") -> None:
+        self.status = status
+        self._json_data = json_data
+        self._text_data = text_data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    async def json(self, content_type=None):
+        return self._json_data
+
+    async def text(self) -> str:
+        return self._text_data
+
+
+class FakeSession:
+    def __init__(self, response: FakeResponse) -> None:
+        self.response = response
+        self.closed = False
+        self.requests = []
+
+    def post(self, url: str, json):
+        self.requests.append({"url": url, "json": json})
+        return self.response
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def test_llama_cpp_client_includes_images_in_chat_payload(tmp_path: Path) -> None:
+    client = LlamaCppChatClient(build_config(tmp_path))
+    session = FakeSession(
+        FakeResponse(
+            status=200,
+            json_data={"choices": [{"message": {"content": "That looks fine."}}]},
+        )
+    )
+    client.http_session = session
+
+    reply = asyncio.run(
+        client.call_chat(
+            "Thoughts?",
+            system_prompt="You are Peter.",
+            user_images=["base64-image"],
+        )
+    )
+
+    assert reply == "That looks fine."
+    assert session.requests[0]["json"]["messages"][-1]["images"] == ["base64-image"]
+
+
+def test_llama_cpp_client_returns_clear_message_for_multimodal_setup_errors(tmp_path: Path) -> None:
+    client = LlamaCppChatClient(build_config(tmp_path))
+    session = FakeSession(
+        FakeResponse(
+            status=500,
+            text_data='{"error":{"message":"multimodal projector missing: pass --mmproj for image input"}}',
+        )
+    )
+    client.http_session = session
+
+    reply = asyncio.run(
+        client.call_chat(
+            "What do you think about this?",
+            system_prompt="You are Peter.",
+            user_images=["base64-image"],
+        )
+    )
+
+    assert reply == MULTIMODAL_SETUP_MESSAGE

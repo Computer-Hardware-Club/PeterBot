@@ -11,6 +11,7 @@ Discord bot with:
 ## Runtime Model
 
 PeterBot now uses the `llama.cpp` HTTP server through its OpenAI-compatible chat API.
+Mention image support requires a multimodal `llama.cpp` model. Text-only models will still answer normal text mentions, but they cannot analyze attached images.
 
 Supported deployment modes:
 - default `docker compose` flow: one bot image that also includes `llama-server`
@@ -94,6 +95,12 @@ Behavior:
 - PeterBot uses [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json)
 - bot state persists in `./peterbot-data`
 
+If you want Peter to analyze Discord image attachments in mention replies, run a multimodal GGUF. Some models also require a separate multimodal projector, which you can pass through `llama_server.extra_args` in [`docker/config.bundled.json`](/Users/ofhd/Developer/PeterBot/docker/config.bundled.json), for example:
+
+```json
+"extra_args": ["--mmproj", "/models/mmproj-your-model.gguf"]
+```
+
 `compose.bundled.yml` remains available as a compatibility alias if you want an explicit file:
 
 ```bash
@@ -112,6 +119,13 @@ Behavior:
 - `llama.cpp` serves the GGUF model from `./models`
 - PeterBot uses [`docker/config.sidecar.json`](/Users/ofhd/Developer/PeterBot/docker/config.sidecar.json)
 - bot state persists in `./peterbot-data`
+
+For mention image support in sidecar mode, the `llama-cpp` service must run a multimodal model. If the model needs a separate projector, add it to the `llama-cpp` command in [`compose.sidecar.yml`](/Users/ofhd/Developer/PeterBot/compose.sidecar.yml), for example:
+
+```yaml
+      - --mmproj
+      - /models/mmproj-your-model.gguf
+```
 
 ### Build targets
 
@@ -179,6 +193,7 @@ Example `paths.channel_profiles_file`:
 ## Commands
 
 - Mention Peter in-channel to get a context-aware reply.
+- Mention Peter with attached images to get an image-aware reply when the backend is running a multimodal vision model.
 - `/ask`: ask Peter a question using recent channel context.
 - `/recap`: summarize the latest discussion into `What happened`, `Decisions`, and `Open questions`.
 - `/suggest`: send a suggestion to the configured suggestions channel.
@@ -230,5 +245,6 @@ If the bundled container exits immediately with `Configuration error: llama_serv
 
 - Runtime data should stay on a mounted persistent volume or bind mount.
 - Bundled mode includes the `llama-server` binary, not the model weights.
-- Mention attachments are still represented in prompt text, but raw multimodal payloads are not forwarded in this `llama.cpp` migration.
+- Mention image attachments are forwarded to `llama.cpp` for mention replies when the backend is configured with a multimodal model.
+- If the backend is text-only or missing multimodal setup, Peter replies with a short setup hint instead of pretending to analyze the image.
 - Runtime files, `.env`, models, and local data dirs are gitignored.

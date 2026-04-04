@@ -17,6 +17,44 @@ from .logging_utils import (
 )
 from .prompts import CHAT_MODE, build_chat_messages, cleanup_response_text, strip_think_blocks
 
+MULTIMODAL_SETUP_MESSAGE = (
+    "I can only look at images if the llama.cpp backend is running a multimodal vision model."
+)
+
+
+def is_multimodal_backend_error(error_text: str) -> bool:
+    normalized = (error_text or "").lower()
+    if not normalized:
+        return False
+
+    image_hints = (
+        "multimodal",
+        "mmproj",
+        "vision",
+        "image",
+        "images",
+        "projector",
+        "mtmd",
+        "clip model",
+        "image_url",
+    )
+    setup_hints = (
+        "missing",
+        "unsupported",
+        "not supported",
+        "not enabled",
+        "requires",
+        "failed to load",
+        "cannot load",
+        "no such file",
+        "disabled",
+        "unknown field",
+        "invalid type",
+    )
+    return any(hint in normalized for hint in image_hints) and any(
+        hint in normalized for hint in setup_hints
+    )
+
 
 def build_chat_completion_payload(
     model: str,
@@ -92,8 +130,6 @@ class LlamaCppChatClient:
         user_images: Optional[List[str]] = None,
         response_mode: str = CHAT_MODE,
     ) -> str:
-        del user_images
-
         await self.ensure_http_session()
         url = f"{self.config.inference.base_url.rstrip('/')}/v1/chat/completions"
         request_debug_id = new_debug_id("REQ")
@@ -104,6 +140,7 @@ class LlamaCppChatClient:
             conversation_history=conversation_history,
             system_prompt=system_prompt,
             user_content=user_content,
+            user_images=user_images,
             allow_thinking=False,
         )
         payload = build_chat_completion_payload(
@@ -126,6 +163,7 @@ class LlamaCppChatClient:
             prompt_preview=truncate_for_log(prompt_text),
             user_content_preview=truncate_for_log(messages[-1]["content"]),
             history_count=len(conversation_history or []),
+            user_image_count=len(user_images or []),
             mode=response_mode,
             timeout_seconds=self.config.inference.timeout_seconds,
         )
@@ -146,6 +184,17 @@ class LlamaCppChatClient:
             async with self.http_session.post(url, json=payload) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
+                    if user_images and is_multimodal_backend_error(error_text):
+                        log_with_context(
+                            logging.WARNING,
+                            f"[{request_debug_id}] Multimodal request rejected by llama.cpp backend",
+                            status=resp.status,
+                            response_preview=truncate_for_log(error_text, max_chars=500),
+                            url=url,
+                            model=self.config.inference.model,
+                        )
+                        return MULTIMODAL_SETUP_MESSAGE
+
                     debug_id = new_debug_id("LLM")
                     log_with_context(
                         logging.ERROR,
