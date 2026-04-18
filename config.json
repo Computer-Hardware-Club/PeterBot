@@ -5,7 +5,7 @@
     "model_profile": "auto"
   },
   "discord": {
-    "suggestion_channel_id": null
+    "suggestion_channel_id": 1308190621084946494
   },
   "inference": {
     "base_url": "http://llama-cpp:8080",
