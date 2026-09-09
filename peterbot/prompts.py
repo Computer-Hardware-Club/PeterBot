@@ -152,12 +152,18 @@ def build_chat_messages(
     if user_content is None:
         user_content = f"{author_name}: {prompt_text}" if author_name else prompt_text
 
-    user_message: Dict[str, Any] = {
-        "role": "user",
-        "content": add_no_think_suffix(user_content, allow_thinking=allow_thinking),
-    }
     if user_images:
-        user_message["images"] = user_images
+        content_parts: List[Dict[str, Any]] = [
+            {"type": "text", "text": add_no_think_suffix(user_content, allow_thinking=allow_thinking)}
+        ]
+        for image in user_images:
+            content_parts.append({"type": "image_url", "image_url": {"url": image}})
+        user_message: Dict[str, Any] = {"role": "user", "content": content_parts}
+    else:
+        user_message = {
+            "role": "user",
+            "content": add_no_think_suffix(user_content, allow_thinking=allow_thinking),
+        }
     messages.append(user_message)
     return messages
 

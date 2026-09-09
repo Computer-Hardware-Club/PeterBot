@@ -155,7 +155,10 @@ def test_llama_cpp_client_includes_images_in_chat_payload(tmp_path: Path) -> Non
     )
 
     assert reply == "That looks fine."
-    assert session.requests[0]["json"]["messages"][-1]["images"] == ["base64-image"]
+    content = session.requests[0]["json"]["messages"][-1]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {"type": "text", "text": "Thoughts?"}
+    assert content[1] == {"type": "image_url", "image_url": {"url": "base64-image"}}
 
 
 def test_llama_cpp_client_returns_clear_message_for_multimodal_setup_errors(tmp_path: Path) -> None:

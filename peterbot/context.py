@@ -223,7 +223,8 @@ async def load_mention_image_payloads(
 
         if not data or len(data) > max_bytes:
             continue
-        images.append(base64.b64encode(data).decode("ascii"))
+        content_type = getattr(attachment, "content_type", "") or "image/jpeg"
+        images.append(f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}")
     return images
 
 
