@@ -49,9 +49,9 @@ def split_for_discord(text: str, max_len: int = 1800) -> List[str]:
 async def send_chunked_reply(message: discord.Message, text: str, *, max_len: int = 1800) -> bool:
     chunks = split_for_discord(text, max_len=max_len)
     try:
-        await message.reply(chunks[0])
+        await message.reply(chunks[0], allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
         for chunk in chunks[1:]:
-            await message.channel.send(chunk)
+            await message.channel.send(chunk, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
         return True
     except discord.HTTPException:
         debug_id = log_exception_with_context(
@@ -81,7 +81,7 @@ async def send_chunked_followup(
     chunks = split_for_discord(text, max_len=max_len)
     try:
         for chunk in chunks:
-            await interaction.followup.send(chunk, ephemeral=ephemeral)
+            await interaction.followup.send(chunk, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
         return True
     except discord.HTTPException:
         log_exception_with_context(
@@ -101,13 +101,13 @@ async def safe_send_interaction_message(
 ) -> bool:
     try:
         if interaction.response.is_done():
-            await interaction.followup.send(text, ephemeral=ephemeral)
+            await interaction.followup.send(text, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
             return True
-        await interaction.response.send_message(text, ephemeral=ephemeral)
+        await interaction.response.send_message(text, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
         return True
     except discord.InteractionResponded:
         try:
-            await interaction.followup.send(text, ephemeral=ephemeral)
+            await interaction.followup.send(text, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
             return True
         except discord.HTTPException:
             log_exception_with_context(

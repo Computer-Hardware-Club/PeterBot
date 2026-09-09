@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 from peterbot.config import (
@@ -108,12 +109,17 @@ class FakeResponse:
         self.status = status
         self._json_data = json_data
         self._text_data = text_data
+        self.content = self
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
+
+    async def iter_chunked(self, size):
+        raw = json.dumps(self._json_data) if self._json_data is not None else self._text_data
+        yield raw.encode()
 
     async def json(self, content_type=None):
         return self._json_data
@@ -128,7 +134,7 @@ class FakeSession:
         self.closed = False
         self.requests = []
 
-    def post(self, url: str, json):
+    def post(self, url: str, json, **kwargs):
         self.requests.append({"url": url, "json": json})
         return self.response
 
