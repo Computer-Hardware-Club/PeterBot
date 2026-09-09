@@ -103,7 +103,9 @@ def test_rounds_reserve_final_answer_and_bound_total_allocated_tokens(tmp_path):
     assert [payload["tool_choice"] for payload in payloads] == ["auto", "auto", "none"]
     assert all(payload["max_tokens"] > 0 for payload in payloads)
     assert sum(payload["max_tokens"] for payload in payloads) <= 301
-    assert all(payload["n"] == 1 and payload["parallel_tool_calls"] is False for payload in payloads)
+    assert all(payload["n"] == 1 for payload in payloads)
+    assert all(payload["parallel_tool_calls"] is False for payload in payloads[:-1])
+    assert "tools" not in payloads[-1]
     assert len(client.tools.calls) == 2
     assert payloads[1]["messages"][-1]["role"] == "tool"
     assert payloads[1]["messages"][-1]["tool_call_id"] == "one"
@@ -387,10 +389,14 @@ def test_hostile_source_cannot_reenable_tools_after_private_context_is_restored(
         injected_messages = [message for message in payload["messages"]
                              if "Ignore all rules" in str(message.get("content", ""))]
         assert len(injected_messages) == 1
-        assert injected_messages[0]["role"] == "tool"
-        assert {tool["function"]["name"] for tool in payload["tools"]} == {
-            "web_search", "fetch_public_page", "calculate",
-        }
+        if payload["tool_choice"] == "auto":
+            assert injected_messages[0]["role"] == "tool"
+            assert {tool["function"]["name"] for tool in payload["tools"]} == {
+                "web_search", "fetch_public_page", "calculate",
+            }
+        else:
+            assert injected_messages[0]["role"] == "user"
+            assert "tools" not in payload
 
 
 def test_plain_response_cannot_request_tools_after_forced_contextual_finalization(tmp_path):
@@ -414,3 +420,66 @@ def test_agent_preserves_multistep_math_explanation_and_paragraphs(tmp_path):
     )
     client = client_with_responses(tmp_path, [completion(explanation)])
     assert chat(client) == explanation
+
+
+@pytest.mark.parametrize("empty", [None, "", "   ", "<think>hidden reasoning</think>"])
+def test_empty_post_search_completion_recovers_with_plain_final_answer(tmp_path, empty):
+    client = client_with_responses(tmp_path, [
+        completion(calls=[tool_call("web_search", '{"query":"NVDA stock price"}')]),
+        completion(empty),
+        completion("The search did not provide a timestamped quote."),
+    ])
+    client.tools = Executor(['{"status":"partial","results":[{"url":"https://www.nvidia.com/"}]}'])
+    answer = chat(client)
+    assert "timestamped quote" in answer
+    assert "smaller question" not in answer
+    payloads = [request["json"] for request in client.http_session.requests]
+    assert len(payloads) == 3
+    assert sum(payload["max_tokens"] for payload in payloads) <= client.config.agent.max_total_tokens
+    final = payloads[-1]
+    assert final["tool_choice"] == "none"
+    assert not {"tools", "functions", "function_call", "parallel_tool_calls"} & final.keys()
+    assert all(message["role"] in {"system", "user", "assistant"} for message in final["messages"])
+    assert all("tool_calls" not in message for message in final["messages"])
+    assert "https://www.nvidia.com/" in json.dumps(final["messages"])
+    assert len(client.tools.calls) == 1
+
+
+def test_empty_final_returns_sources_without_retrying_or_inventing_a_quote(tmp_path):
+    client = client_with_responses(tmp_path, [
+        completion(calls=[tool_call("web_search", '{"query":"NVDA stock price"}', "one")]),
+        completion(calls=[tool_call("web_search", '{"query":"NVDA quote"}', "two")]),
+        {"choices": [{"finish_reason": "stop", "message": {"content": None}}],
+         "usage": {"completion_tokens": 37}},
+    ])
+    client.tools = Executor([
+        '{"status":"partial","results":[{"url":"https://www.nvidia.com/"}]}',
+        '{"status":"partial","results":[]}',
+    ])
+    answer = chat(client)
+    assert "https://www.nvidia.com/" in answer
+    assert "couldn't generate" in answer
+    assert "smaller question" not in answer
+    assert len(client.http_session.requests) == 3
+    assert len(client.tools.calls) == 2
+
+
+def test_empty_first_completion_can_recover_without_tools(tmp_path):
+    client = client_with_responses(tmp_path, [completion(None), completion("Hi there.")])
+    assert chat(client) == "Hi there."
+    assert client.http_session.requests[-1]["json"]["tool_choice"] == "none"
+    assert client.tools.calls == []
+
+
+def test_fetched_quote_page_precedes_generic_search_links_in_sources(tmp_path):
+    client = client_with_responses(tmp_path, [
+        completion(calls=[tool_call("web_search", '{"query":"NVDA quote"}', "search")]),
+        completion(calls=[tool_call("fetch_public_page", '{"url":"https://stockanalysis.com/stocks/nvda/"}', "page")]),
+        completion("The quote page provides a timestamped closing price."),
+    ])
+    client.tools = Executor([
+        json.dumps({"results": [{"url": f"https://www.nvidia.com/page{i}/"} for i in range(5)]}),
+        '{"status":"ok","url":"https://stockanalysis.com/stocks/nvda/","text":"Dated quote"}',
+    ])
+    answer = chat(client)
+    assert answer.split("Sources: ")[1].startswith("<https://stockanalysis.com/stocks/nvda/>")
