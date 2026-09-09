@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Optional
@@ -241,108 +242,116 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
 
         if bot.user and bot.user in message.mentions:
             content = build_current_mention_prompt_text(message, bot_user_id=bot.user.id)
+            admitted, reason = runtime.request_guard.acquire(
+                user_id=message.author.id, guild_id=getattr(message.guild, "id", None), prompt=content,
+            )
+            if not admitted:
+                await send_chunked_reply(message, reason or "Please try again shortly.",
+                                         max_len=config.max_discord_message_chars)
+                return
             try:
-                mention_images, image_error = await resolve_mention_images(
-                    message,
-                    image_limit=config.mention_image_limit,
-                    max_image_bytes=config.mention_max_image_bytes,
-                )
-                if image_error:
-                    await send_chunked_reply(
+                async with asyncio.timeout(config.agent.request_timeout_seconds):
+                    mention_images, image_error = await resolve_mention_images(
                         message,
-                        image_error,
-                        max_len=config.max_discord_message_chars,
+                        image_limit=config.mention_image_limit,
+                        max_image_bytes=config.mention_max_image_bytes,
                     )
-                    await bot.process_commands(message)
-                    return
+                    if image_error:
+                        await send_chunked_reply(
+                            message,
+                            image_error,
+                            max_len=config.max_discord_message_chars,
+                        )
+                        await bot.process_commands(message)
+                        return
 
-                recent_entries = await get_recent_channel_entries(
-                    message.channel,
-                    bot_user_id=bot.user.id,
-                    peter_name=config.peter_name,
-                    limit=config.mention_context_fetch_limit,
-                    before=message.created_at,
-                    max_chars=config.max_context_message_chars,
-                )
-                explicit_reply_entry = await resolve_reply_target_entry(
-                    message,
-                    recent_entries,
-                    bot_user_id=bot.user.id,
-                    peter_name=config.peter_name,
-                    max_chars=config.max_context_message_chars,
-                )
-                mention_bundle = build_mention_context_bundle(
-                    message,
-                    content,
-                    recent_entries,
-                    focus_message_limit=config.mention_focus_message_limit,
-                    active_gap_minutes=config.mention_active_gap_minutes,
-                    max_background_age_minutes=config.mention_max_background_age_minutes,
-                    assistant_tail_limit=config.mention_assistant_tail_limit,
-                    explicit_reply_entry=explicit_reply_entry,
-                )
-                log_with_context(
-                    logging.DEBUG,
-                    "Built mention focus context",
-                    prompt_preview=truncate_for_log(content),
-                    selection_reason=mention_bundle["selection_reason"],
-                    target_message_id=mention_bundle["target_message_id"],
-                    target_age=mention_bundle["target_age_text"],
-                    selected_count=mention_bundle["selected_count"],
-                    needs_strong_target=mention_bundle["needs_strong_target"],
-                    **message_log_context(message),
-                )
-
-                if mention_bundle["clarification_text"]:
+                    recent_entries = await get_recent_channel_entries(
+                        message.channel,
+                        bot_user_id=bot.user.id,
+                        peter_name=config.peter_name,
+                        limit=config.mention_context_fetch_limit,
+                        before=message.created_at,
+                        max_chars=config.max_context_message_chars,
+                    )
+                    explicit_reply_entry = await resolve_reply_target_entry(
+                        message,
+                        recent_entries,
+                        bot_user_id=bot.user.id,
+                        peter_name=config.peter_name,
+                        max_chars=config.max_context_message_chars,
+                    )
+                    mention_bundle = build_mention_context_bundle(
+                        message,
+                        content,
+                        recent_entries,
+                        focus_message_limit=config.mention_focus_message_limit,
+                        active_gap_minutes=config.mention_active_gap_minutes,
+                        max_background_age_minutes=config.mention_max_background_age_minutes,
+                        assistant_tail_limit=config.mention_assistant_tail_limit,
+                        explicit_reply_entry=explicit_reply_entry,
+                    )
                     log_with_context(
-                        logging.INFO,
-                        "Mention requires clarification instead of stale guess",
-                        selection_reason=mention_bundle["selection_reason"],
+                        logging.DEBUG,
+                        "Built mention focus context",
                         prompt_preview=truncate_for_log(content),
+                        selection_reason=mention_bundle["selection_reason"],
+                        target_message_id=mention_bundle["target_message_id"],
+                        target_age=mention_bundle["target_age_text"],
+                        selected_count=mention_bundle["selected_count"],
+                        needs_strong_target=mention_bundle["needs_strong_target"],
                         **message_log_context(message),
                     )
-                    await send_chunked_reply(
-                        message,
-                        mention_bundle["clarification_text"],
-                        max_len=config.max_discord_message_chars,
-                    )
-                    await bot.process_commands(message)
-                    return
 
-                system_prompt, knowledge_chunks = build_prompt_artifacts(
-                    config=config,
-                    knowledge_index=runtime.knowledge_index,
-                    prompt_text=content,
-                    author_name=message.author.display_name,
-                    guild_name=message.guild.name if message.guild else None,
-                    channel=message.channel,
-                    focus_note=mention_bundle["focus_note"],
-                    mode=MENTION_MODE,
-                )
-                log_with_context(
-                    logging.DEBUG,
-                    "Resolved mention prompt artifacts",
-                    knowledge_count=len(knowledge_chunks),
-                    **message_log_context(message),
-                )
+                    if mention_bundle["clarification_text"]:
+                        log_with_context(
+                            logging.INFO,
+                            "Mention requires clarification instead of stale guess",
+                            selection_reason=mention_bundle["selection_reason"],
+                            prompt_preview=truncate_for_log(content),
+                            **message_log_context(message),
+                        )
+                        await send_chunked_reply(
+                            message,
+                            mention_bundle["clarification_text"],
+                            max_len=config.max_discord_message_chars,
+                        )
+                        await bot.process_commands(message)
+                        return
 
-                async with message.channel.typing():
-                    reply = await runtime.llm_client.call_chat(
+                    system_prompt, knowledge_chunks = build_prompt_artifacts(
+                        config=config,
+                        knowledge_index=runtime.knowledge_index,
                         prompt_text=content,
                         author_name=message.author.display_name,
                         guild_name=message.guild.name if message.guild else None,
-                        channel_name=getattr(message.channel, "name", None),
-                        conversation_history=mention_bundle["conversation_history"],
-                        system_prompt=system_prompt,
-                        user_content=mention_bundle["user_content"],
-                        user_images=mention_images or None,
-                        response_mode=MENTION_MODE,
+                        channel=message.channel,
+                        focus_note=mention_bundle["focus_note"],
+                        mode=MENTION_MODE,
                     )
-                await send_chunked_reply(
-                    message,
-                    reply or "(No response)",
-                    max_len=config.max_discord_message_chars,
-                )
+                    log_with_context(
+                        logging.DEBUG,
+                        "Resolved mention prompt artifacts",
+                        knowledge_count=len(knowledge_chunks),
+                        **message_log_context(message),
+                    )
+
+                    async with message.channel.typing():
+                        reply = await runtime.llm_client.call_chat(
+                            prompt_text=content,
+                            author_name=message.author.display_name,
+                            guild_name=message.guild.name if message.guild else None,
+                            channel_name=getattr(message.channel, "name", None),
+                            conversation_history=mention_bundle["conversation_history"],
+                            system_prompt=system_prompt,
+                            user_content=mention_bundle["user_content"],
+                            user_images=mention_images or None,
+                            response_mode=MENTION_MODE,
+                        )
+                    await send_chunked_reply(
+                        message,
+                        reply or "(No response)",
+                        max_len=config.max_discord_message_chars,
+                    )
             except Exception:
                 debug_id = log_exception_with_context(
                     "Failed handling mention response",
@@ -357,6 +366,8 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                     ),
                     max_len=config.max_discord_message_chars,
                 )
+            finally:
+                runtime.request_guard.release(user_id=message.author.id)
 
         await bot.process_commands(message)
 
@@ -422,34 +433,51 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
     @bot.tree.command(name="ask", description="Ask Peter a question")
     @discord.app_commands.describe(prompt="Your question or prompt for Peter")
     async def ask(interaction: discord.Interaction, prompt: str) -> None:
+        admitted, reason = runtime.request_guard.acquire(
+            user_id=interaction.user.id, guild_id=getattr(interaction.guild, "id", None), prompt=prompt,
+        )
+        if not admitted:
+            await safe_send_interaction_message(interaction, reason or "Please try again shortly.")
+            return
         try:
-            await interaction.response.defer(ephemeral=True)
-            context_messages = await get_channel_context_messages(
-                interaction.channel,
-                bot_user_id=getattr(bot.user, "id", None),
-                peter_name=config.peter_name,
-                limit=config.channel_context_limit,
-                before=interaction.created_at,
-                max_chars=config.max_context_message_chars,
-            )
-            system_prompt, knowledge_chunks = build_prompt_artifacts(
-                config=config,
-                knowledge_index=runtime.knowledge_index,
-                prompt_text=prompt,
-                author_name=interaction.user.display_name,
-                guild_name=interaction.guild.name if interaction.guild else None,
-                channel=interaction.channel,
-                mode=CHAT_MODE,
-            )
-            log_with_context(
-                logging.DEBUG,
-                "Resolved /ask prompt artifacts",
-                knowledge_count=len(knowledge_chunks),
-                **interaction_log_context(interaction),
-            )
+            async with asyncio.timeout(config.agent.request_timeout_seconds):
+                await interaction.response.defer(ephemeral=True)
+                context_messages = await get_channel_context_messages(
+                    interaction.channel,
+                    bot_user_id=getattr(bot.user, "id", None),
+                    peter_name=config.peter_name,
+                    limit=config.channel_context_limit,
+                    before=interaction.created_at,
+                    max_chars=config.max_context_message_chars,
+                )
+                system_prompt, knowledge_chunks = build_prompt_artifacts(
+                    config=config,
+                    knowledge_index=runtime.knowledge_index,
+                    prompt_text=prompt,
+                    author_name=interaction.user.display_name,
+                    guild_name=interaction.guild.name if interaction.guild else None,
+                    channel=interaction.channel,
+                    mode=CHAT_MODE,
+                )
+                log_with_context(
+                    logging.DEBUG,
+                    "Resolved /ask prompt artifacts",
+                    knowledge_count=len(knowledge_chunks),
+                    **interaction_log_context(interaction),
+                )
 
-            if hasattr(interaction.channel, "typing"):
-                async with interaction.channel.typing():
+                if hasattr(interaction.channel, "typing"):
+                    async with interaction.channel.typing():
+                        reply = await runtime.llm_client.call_chat(
+                            prompt_text=prompt,
+                            author_name=interaction.user.display_name,
+                            guild_name=interaction.guild.name if interaction.guild else None,
+                            channel_name=getattr(interaction.channel, "name", None),
+                            conversation_history=context_messages,
+                            system_prompt=system_prompt,
+                            response_mode=CHAT_MODE,
+                        )
+                else:
                     reply = await runtime.llm_client.call_chat(
                         prompt_text=prompt,
                         author_name=interaction.user.display_name,
@@ -459,28 +487,18 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                         system_prompt=system_prompt,
                         response_mode=CHAT_MODE,
                     )
-            else:
-                reply = await runtime.llm_client.call_chat(
-                    prompt_text=prompt,
-                    author_name=interaction.user.display_name,
-                    guild_name=interaction.guild.name if interaction.guild else None,
-                    channel_name=getattr(interaction.channel, "name", None),
-                    conversation_history=context_messages,
-                    system_prompt=system_prompt,
-                    response_mode=CHAT_MODE,
-                )
-            delivered = await send_chunked_followup(
-                interaction,
-                reply or "(No response)",
-                ephemeral=True,
-                max_len=config.max_discord_message_chars,
-            )
-            if not delivered:
-                await safe_send_interaction_message(
+                delivered = await send_chunked_followup(
                     interaction,
-                    "I generated a reply but couldn't deliver it. Please try again.",
+                    reply or "(No response)",
                     ephemeral=True,
+                    max_len=config.max_discord_message_chars,
                 )
+                if not delivered:
+                    await safe_send_interaction_message(
+                        interaction,
+                        "I generated a reply but couldn't deliver it. Please try again.",
+                        ephemeral=True,
+                    )
         except Exception:
             debug_id = log_exception_with_context(
                 "Error in /ask command",
@@ -495,59 +513,68 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 ),
                 ephemeral=True,
             )
+        finally:
+            runtime.request_guard.release(user_id=interaction.user.id)
 
     @bot.tree.command(name="recap", description="Summarize the recent discussion in this channel")
     @discord.app_commands.describe(count="How many recent messages to include in the recap")
     async def recap(interaction: discord.Interaction, count: int = 25) -> None:
+        admitted, reason = runtime.request_guard.acquire(
+            user_id=interaction.user.id, guild_id=getattr(interaction.guild, "id", None), prompt="Recap the recent channel discussion.",
+        )
+        if not admitted:
+            await safe_send_interaction_message(interaction, reason or "Please try again shortly.")
+            return
         try:
-            await interaction.response.defer(ephemeral=True)
-            recap_count = clamp_recap_count(count, config.recap_max_messages)
-            recent_entries = await get_recent_channel_entries(
-                interaction.channel,
-                bot_user_id=getattr(bot.user, "id", None),
-                peter_name=config.peter_name,
-                limit=recap_count,
-                before=interaction.created_at,
-                max_chars=config.max_context_message_chars,
-            )
-            if not recent_entries:
-                await safe_send_interaction_message(
-                    interaction,
-                    "I couldn't find enough recent messages to recap.",
-                    ephemeral=True,
+            async with asyncio.timeout(config.agent.request_timeout_seconds):
+                await interaction.response.defer(ephemeral=True)
+                recap_count = clamp_recap_count(count, config.recap_max_messages)
+                recent_entries = await get_recent_channel_entries(
+                    interaction.channel,
+                    bot_user_id=getattr(bot.user, "id", None),
+                    peter_name=config.peter_name,
+                    limit=recap_count,
+                    before=interaction.created_at,
+                    max_chars=config.max_context_message_chars,
                 )
-                return
+                if not recent_entries:
+                    await safe_send_interaction_message(
+                        interaction,
+                        "I couldn't find enough recent messages to recap.",
+                        ephemeral=True,
+                    )
+                    return
 
-            system_prompt, _ = build_prompt_artifacts(
-                config=config,
-                knowledge_index=runtime.knowledge_index,
-                prompt_text="Summarize the recent channel discussion.",
-                author_name=interaction.user.display_name,
-                guild_name=interaction.guild.name if interaction.guild else None,
-                channel=interaction.channel,
-                mode=RECAP_MODE,
-                include_channel_profile=False,
-                include_knowledge=False,
-            )
-            reply = await runtime.llm_client.call_chat(
-                prompt_text=f"Summarize the last {len(recent_entries)} messages in this channel.",
-                author_name=interaction.user.display_name,
-                guild_name=interaction.guild.name if interaction.guild else None,
-                channel_name=getattr(interaction.channel, "name", None),
-                conversation_history=build_recap_history(recent_entries, interaction.created_at),
-                system_prompt=system_prompt,
-                user_content=(
-                    f"[Recap request | now] {interaction.user.display_name}: "
-                    f"Recap the last {len(recent_entries)} messages."
-                ),
-                response_mode=RECAP_MODE,
-            )
-            await send_chunked_followup(
-                interaction,
-                reply,
-                ephemeral=True,
-                max_len=config.max_discord_message_chars,
-            )
+                system_prompt, _ = build_prompt_artifacts(
+                    config=config,
+                    knowledge_index=runtime.knowledge_index,
+                    prompt_text="Summarize the recent channel discussion.",
+                    author_name=interaction.user.display_name,
+                    guild_name=interaction.guild.name if interaction.guild else None,
+                    channel=interaction.channel,
+                    mode=RECAP_MODE,
+                    include_channel_profile=False,
+                    include_knowledge=False,
+                )
+                reply = await runtime.llm_client.call_chat(
+                    prompt_text=f"Summarize the last {len(recent_entries)} messages in this channel.",
+                    author_name=interaction.user.display_name,
+                    guild_name=interaction.guild.name if interaction.guild else None,
+                    channel_name=getattr(interaction.channel, "name", None),
+                    conversation_history=build_recap_history(recent_entries, interaction.created_at),
+                    system_prompt=system_prompt,
+                    user_content=(
+                        f"[Recap request | now] {interaction.user.display_name}: "
+                        f"Recap the last {len(recent_entries)} messages."
+                    ),
+                    response_mode=RECAP_MODE,
+                )
+                await send_chunked_followup(
+                    interaction,
+                    reply,
+                    ephemeral=True,
+                    max_len=config.max_discord_message_chars,
+                )
         except Exception:
             debug_id = log_exception_with_context(
                 "Error in /recap command",
@@ -562,6 +589,8 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 ),
                 ephemeral=True,
             )
+        finally:
+            runtime.request_guard.release(user_id=interaction.user.id)
 
     @bot.tree.command(name="suggest", description="Submit a suggestion to improve the bot")
     @discord.app_commands.describe(suggestion="Your suggestion for improving the bot")
