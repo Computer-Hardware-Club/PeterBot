@@ -12,3 +12,6 @@ RUN python -c "import site,pathlib; pathlib.Path(site.getsitepackages()[0], 'pet
 USER 10000:10000
 WORKDIR /workspace
 ENTRYPOINT ["python", "-I", "-m", "peterbot.hermes_worker"]
+
+ARG PETERBOT_REVISION=unknown
+LABEL org.opencontainers.image.revision=$PETERBOT_REVISION

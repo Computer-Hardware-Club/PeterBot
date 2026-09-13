@@ -1,6 +1,6 @@
 # Hermes-backed Peter
 
-Status: implementation in progress. The deployed bot remains on the previous bounded harness until the staged integration passes verification.
+Status: officer-pilot implementation verified in staging; see deploy/HERMES.md for operating boundaries and deployment instructions. Local suite: 611 passed, 1 optional runtime test skipped. That runtime test passed separately against the real pinned Hermes image. A real Qwen smoke completed calculation, attachment reading, sandbox code/artifact creation, and memory save/recall. All 14 live sandbox isolation checks passed.
 
 ## Decision
 

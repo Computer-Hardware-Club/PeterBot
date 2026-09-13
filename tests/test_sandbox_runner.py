@@ -152,11 +152,11 @@ def test_run_returns_artifacts_and_always_cleans_container():
 
     async def fake_docker(args, **kwargs):
         calls.append(args)
-        if args[0] == "exec":
+        if "peterbot.hermes_worker" in args:
             payloads.append(json.loads(kwargs["input_data"]))
-        if args[0] == "cp":
-            if ".peter-result.json" in args[1]:
-                return archive([(".peter-result.json", b'{"answer":"Done"}', tarfile.REGTYPE)])
+        if sr.RESULT_READ_SOURCE in args:
+            return b'{"answer":"Done"}'
+        if "/bin/tar" in args:
             return archive([("artifacts/report.txt", b"result", tarfile.REGTYPE)])
         return b""
 
@@ -169,11 +169,14 @@ def test_run_returns_artifacts_and_always_cleans_container():
                                                  "artifacts": [{"name": "report.txt", "data_base64": "cmVzdWx0"}]}
     asyncio.run(exercise())
     assert payloads == [{"task": "hello", "image": "ignored"}]
+    assert all(call[0] != "cp" for call in calls)
+    assert ["exec", f"peterbot-peterbot-{JOB_ID}", "/usr/local/bin/python", "-I", "-c", sr.RESULT_READ_SOURCE] in calls
+    assert ["exec", f"peterbot-peterbot-{JOB_ID}", "/bin/tar", "-C", "/workspace", "-cf", "-", "--", "artifacts"] in calls
     assert calls[0][calls[0].index("--entrypoint") + 2] == SETTINGS.image
     assert calls[-1] == ["rm", "--force", f"peterbot-peterbot-{JOB_ID}"]
 
 
-def test_worker_failure_sanitized_and_cleaned():
+def test_worker_failure_sanitized_and_cleaned(caplog):
     calls = []
 
     async def fake_docker(args, **kwargs):
@@ -192,6 +195,9 @@ def test_worker_failure_sanitized_and_cleaned():
                 assert json.loads(text)["status"] == "failed"
     asyncio.run(exercise())
     assert calls[-1][0] == "rm"
+    assert "phase=exec error_type=RuntimeError" in caplog.text
+    assert TOKEN not in caplog.text
+    assert "DO NOT LEAK" not in caplog.text
 
 
 def test_cancel_and_busy_limits():
@@ -312,3 +318,100 @@ def test_client_disconnect_removes_worker():
                 await asyncio.gather(task, return_exceptions=True)
                 await asyncio.wait_for(cleaned.wait(), 2)
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("code", ["model_failed", "private-error-" + TOKEN, {"secret": TOKEN}])
+def test_worker_error_codes_are_allowlisted_in_response_and_logs(caplog, code):
+    async def fake_docker(args, **kwargs):
+        if sr.RESULT_READ_SOURCE in args:
+            result = {"status": "failed", "answer": "Task failed", "error_code": code}
+            return json.dumps(result).encode()
+        if "/bin/tar" in args:
+            return archive([])
+        return b""
+
+    async def exercise():
+        with patch.object(sr, "docker", fake_docker):
+            async with TestClient(TestServer(sr.create_app(SETTINGS, cleanup_on_start=False))) as client:
+                response = await client.post("/run", headers={"Authorization": "Bearer " + TOKEN},
+                                             json={"job_id": JOB_ID, "request": {}})
+                result = await response.json()
+                if code == "model_failed":
+                    assert result["error_code"] == code
+                else:
+                    assert "error_code" not in result
+    asyncio.run(exercise())
+    assert "phase=worker_result" in caplog.text
+    assert TOKEN not in caplog.text
+
+
+def test_stderr_diagnostics_allow_only_safe_frames_and_exception_classes():
+    stderr = ('Traceback (most recent call last):\n'
+              '  File "<frozen runpy>", line 198, in _run_module_as_main\n'
+              '  File "/app/peterbot/hermes_worker.py", line 430, in main\n'
+              '    secret = "' + TOKEN + '"\n'
+              '  File "/workspace/' + TOKEN + '.py", line 1, in bad\n'
+              '  File "/app/peterbot/../../' + TOKEN + '", line 1, in bad\n'
+              '  File "/app/peterbot/hermes_worker.py", line 9, in bad\x1b[31m\n'
+              'PermissionError: secret token = ' + TOKEN + '\n').encode()
+    diagnostics = sr.safe_stderr_diagnostics(stderr)
+    assert diagnostics == [
+        '  File "<frozen runpy>", line 198, in _run_module_as_main',
+        '  File "/app/peterbot/hermes_worker.py", line 430, in main',
+        'exception_type=PermissionError',
+    ]
+    assert TOKEN not in str(diagnostics)
+
+
+def test_nonzero_subprocess_drains_stderr_without_logging_secrets(caplog):
+    import sys
+    original = asyncio.create_subprocess_exec
+    initial = ('  File "/app/peterbot/hermes_worker.py", line 430, in main\n'
+               'PermissionError: ' + TOKEN + '\n')
+    program = ('import sys\n'
+               'sys.stderr.write(' + repr(initial) + ')\n'
+               'sys.stderr.write("x" * 200000)\n'
+               'sys.stderr.write("\\nRuntimeError: discarded past cap\\n")\n'
+               'sys.stdout.write(' + repr(TOKEN) + ')\n'
+               'sys.exit(1)\n')
+
+    async def spawn(*args, **kwargs):
+        return await original(sys.executable, "-c", program, **kwargs)
+
+    async def exercise():
+        with patch.object(asyncio, "create_subprocess_exec", spawn):
+            assert await sr.docker(["exec"], check=False, timeout=3) == TOKEN.encode()
+    asyncio.run(exercise())
+    assert "exit_code=1" in caplog.text
+    assert 'hermes_worker.py", line 430, in main' in caplog.text
+    assert "exception_type=PermissionError" in caplog.text
+    assert "RuntimeError" not in caplog.text
+    assert TOKEN not in caplog.text
+    assert "x" * 100 not in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["regular", "symlink", "fifo", "oversized"])
+def test_tmpfs_result_reader_is_bounded_regular_file_only(tmp_path, kind):
+    import os
+    import subprocess
+    import sys
+    path = tmp_path / "result.json"
+    expected = b'{"answer":"collected from live mount"}'
+    if kind == "symlink":
+        target = tmp_path / "target.json"
+        target.write_bytes(expected)
+        path.symlink_to(target)
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        path.write_bytes(expected if kind == "regular" else b"x" * (sr.MAX_RESULT + 1))
+    # Substitute only the hardcoded path for this filesystem test; the production
+    # command takes no caller-controlled path, source, or environment.
+    source = sr.RESULT_READ_SOURCE.replace("'/workspace/.peter-result.json'", repr(str(path)))
+    result = subprocess.run([sys.executable, "-I", "-c", source], capture_output=True, timeout=3)
+    if kind == "regular":
+        assert result.returncode == 0
+        assert result.stdout == expected
+    else:
+        assert result.returncode != 0
+        assert result.stdout == b""

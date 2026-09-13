@@ -7,8 +7,6 @@ import asyncio
 import base64
 import json
 import os
-from pathlib import Path
-from types import SimpleNamespace
 from dataclasses import replace
 
 import aiohttp
@@ -16,11 +14,11 @@ from aiohttp import web
 from peterbot.config import AppConfig
 from peterbot.agent_policy import Principal
 from peterbot.hermes_settings import HermesSettings
-from peterbot.hermes_gateway import HermesGateway, Capability
-import time
+from peterbot.hermes_gateway import HermesGateway
 
 
 async def main():
+    os.environ['DISCORD_TOKEN']='deployment-smoke-unused-no-discord-connection'
     config=AppConfig.load()
     settings=HermesSettings.load(os.environ['PETERBOT_HERMES_CONFIG'])
     settings=replace(settings,state_dir=os.environ['PETERBOT_SMOKE_STATE'])
@@ -37,8 +35,26 @@ async def main():
     gateway.principal=principal
     gateway.session=aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=240),trust_env=False)
     app=web.Application(client_max_size=2*1024*1024)
-    app.router.add_post('/tool',gateway.tool)
-    app.router.add_post('/v1/chat/completions',gateway.model)
+    async def traced_tool(request):
+        body=await request.json()
+        response=await gateway.tool(request)
+        print(json.dumps({'broker_tool':body.get('tool'),'http_status':response.status,
+                          'result_keys':list(json.loads(response.body))}),flush=True)
+        return response
+    app.router.add_post('/tool',traced_tool)
+    async def traced_model(request):
+        try:
+            response = await gateway.model(request)
+            data = json.loads(response.body)
+            message = data.get('choices',[{}])[0].get('message',{})
+            print(json.dumps({'model_http_status':response.status,
+                'reasoning_chars':len(message.get('reasoning_content') or message.get('reasoning') or ''),
+                'tool_calls':[c.get('function',{}).get('name') for c in message.get('tool_calls') or []]}),flush=True)
+            return response
+        except web.HTTPException as exc:
+            print(json.dumps({'model_http_status':exc.status}),flush=True)
+            raise
+    app.router.add_post('/v1/chat/completions',traced_model)
     app.router.add_get('/v1/models',gateway.models)
     server=web.AppRunner(app,access_log=None)
     await server.setup(); await web.TCPSite(server,'0.0.0.0',8770).start()

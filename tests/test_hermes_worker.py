@@ -64,6 +64,7 @@ def test_real_runtime_contract_thinking_privacy_and_cleanup(prepared):
     assert "secret-job-capability" not in agent.conversation_kwargs["system_message"]
     assert agent.kwargs["max_iterations"] == 30 and agent.kwargs["max_tokens"] == 8192
     assert json.loads((prepared / "home/config.yaml").read_text())["plugins"]["enabled"] == []
+    assert json.loads((prepared / "home/config.yaml").read_text())["model"]["streaming"] is False
 
 
 def test_schema_cannot_be_widened_by_hermes_discovery():
@@ -124,7 +125,7 @@ def test_broker_memory_dispatch_does_not_invent_authority(tmp_path):
 def test_provider_failure_does_not_leak_and_resources_close(prepared, monkeypatch):
     monkeypatch.setattr(FakeHermes, "result", {"completed": False, "failed": True, "error": "Bearer SECRET", "final_response": "Provider dump"})
     result = run_job(job(), runtime_loader=lambda: (FakeHermes, {}), workspace=prepared / "workspace", home=prepared / "home")
-    assert result == {"status": "failed", "answer": FAILURE_ANSWER}
+    assert result == {"status": "failed", "answer": FAILURE_ANSWER, "error_code": "model_failed"}
     assert FakeHermes.instances[-1].closed
 
 
@@ -215,3 +216,32 @@ def test_attachments_require_fresh_directory_and_refuse_symlink(tmp_path, symlin
     with pytest.raises(FileExistsError):
         stage_input_files([attachment()], tmp_path)
     assert not (tmp_path / "sample.csv").exists()
+
+
+def test_tool_diagnostics_report_only_safe_names_and_exception_classes(tmp_path):
+    def failing(*args, **kwargs):
+        raise PermissionError("secret raw provider response and capability token")
+    agent = build_agent_class(FakeHermes, {"write_file": failing})()
+    agent.peter_workspace = tmp_path
+    agent.peter_broker = SimpleNamespace(call=lambda *a: '{"ok": true}')
+    messages = []
+    calls = [call("write_file", {"path": "x", "content": "private content"}),
+             call("peter_roster", {}), call("secret-user-supplied-name", {})]
+    agent._execute_tool_calls(SimpleNamespace(tool_calls=calls), messages, "task")
+    assert agent.peter_diagnostics == [
+        {"tool": "write_file", "error_type": "PermissionError", "succeeded": False},
+        {"tool": "peter_roster", "error_type": "none", "succeeded": True},
+        {"tool": "unknown", "error_type": "ValueError", "succeeded": False}]
+    assert "secret" not in json.dumps(agent.peter_diagnostics)
+
+
+def test_tool_diagnostics_survive_failed_conversation(prepared):
+    class FailedConversation(FakeHermes):
+        def run_conversation(self, *args, **kwargs):
+            self._execute_tool_calls(SimpleNamespace(tool_calls=[call("peter_roster", {})]), [], "task")
+            return {"failed": True, "error": "SECRET"}
+    result = run_job(job(), runtime_loader=lambda: (FailedConversation, {}), workspace=prepared / "workspace", home=prepared / "home")
+    assert result["status"] == "failed"
+    assert result["diagnostics"][0]["tool"] == "peter_roster"
+    assert result["diagnostics"][0]["succeeded"] is False
+    assert "SECRET" not in json.dumps(result)

@@ -65,6 +65,9 @@ TOOL_SCHEMAS = [
 SCHEMAS_BY_NAME = {tool["function"]["name"]: tool["function"]["parameters"] for tool in TOOL_SCHEMAS}
 NATIVE_TOOLS = frozenset({"terminal", "read_file", "write_file", "patch"})
 BROKER_TOOLS = frozenset(SCHEMAS_BY_NAME) - NATIVE_TOOLS
+DIAGNOSTIC_ERRORS = frozenset({"none", "ToolResultError", "Exception", "ValueError", "TypeError",
+    "KeyError", "AttributeError", "RuntimeError", "OSError", "PermissionError", "FileNotFoundError",
+    "ImportError", "ModuleNotFoundError", "JSONDecodeError", "HTTPError", "URLError", "TimeoutError"})
 
 
 def validate_arguments(name: str, arguments: Any) -> dict:
@@ -137,6 +140,7 @@ def build_agent_class(base_class, native_handlers: dict):
         def _execute_tool_calls(self, assistant_message, messages, effective_task_id, api_call_count=0):
             for call in assistant_message.tool_calls or []:
                 name = call.function.name
+                error_type = "none"
                 try:
                     arguments = validate_arguments(name, json.loads(call.function.arguments))
                     if name in NATIVE_TOOLS:
@@ -149,9 +153,23 @@ def build_agent_class(base_class, native_handlers: dict):
                         result = self.peter_broker.call(name, arguments)
                     if not isinstance(result, str):
                         result = json.dumps(result)
-                except Exception:
+                    try:
+                        parsed_result = json.loads(result)
+                    except (ValueError, TypeError):
+                        parsed_result = None
+                    if isinstance(parsed_result, dict) and (parsed_result.get("error") or parsed_result.get("success") is False):
+                        error_type = "ToolResultError"
+                except Exception as exc:
                     # Native/provider exceptions can contain credentials and raw requests.
+                    error_type = type(exc).__name__
+                    if error_type not in DIAGNOSTIC_ERRORS:
+                        error_type = "Exception"
                     result = json.dumps({"error": "Tool denied or failed; check its permitted arguments and task scope."})
+                if not hasattr(self, "peter_diagnostics"):
+                    self.peter_diagnostics = []
+                if len(self.peter_diagnostics) < 100:
+                    self.peter_diagnostics.append({"tool": name if name in SCHEMAS_BY_NAME else "unknown",
+                                                   "error_type": error_type, "succeeded": error_type == "none"})
                 messages.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": result[:262144]})
     return PeterAgent
 
@@ -166,7 +184,10 @@ def prepare_environment(home: Path, workspace: Path) -> None:
     # Fresh per-container home; no project profile, plugins, MCP, skill learning,
     # shared session search or built-in memory. Explicit context avoids metadata I/O.
     config = {"plugins": {"enabled": []}, "mcp_servers": {}, "context": {"engine": "compressor"},
-              "model": {"context_length": 262144}, "memory": {"memory_enabled": False, "user_profile_enabled": False},
+              # The authenticated gateway returns bounded JSON, not an SSE stream.
+              # Hermes otherwise treats a valid tool-call response as an empty
+              # stream and retries without ever dispatching the tool.
+              "model": {"context_length": 262144, "streaming": False}, "memory": {"memory_enabled": False, "user_profile_enabled": False},
               "skills": {"creation": False}, "compression": {"enabled": True}}
     (home / "config.yaml").write_text(json.dumps(config), encoding="utf-8")
     os.chdir(workspace)
@@ -229,6 +250,16 @@ def public_answer(text: Any) -> str:
 
 def run_job(job: dict, *, runtime_loader=load_runtime, workspace=Path("/workspace"), home=Path("/tmp/hermes")) -> dict:
     agent = None
+    phase = "invalid_request"
+
+    def outcome(status: str, answer: str, error_code: str | None = None) -> dict:
+        response = {"status": status, "answer": answer}
+        if error_code:
+            response["error_code"] = error_code
+        if agent is not None and getattr(agent, "peter_diagnostics", None):
+            response["diagnostics"] = list(agent.peter_diagnostics)
+        return response
+
     try:
         prompt, identity = job["prompt"], job["identity"]
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 60000 or not isinstance(identity, dict):
@@ -238,6 +269,7 @@ def run_job(job: dict, *, runtime_loader=load_runtime, workspace=Path("/workspac
             raise ValueError("Invalid broker configuration")
         prepare_environment(home, workspace)
         input_paths = stage_input_files(job.get("input_files", []), workspace)
+        phase = "initialization_failed"
         base_class, native_handlers = runtime_loader()
         agent_class = build_agent_class(base_class, native_handlers)
         system = (
@@ -272,14 +304,15 @@ def run_job(job: dict, *, runtime_loader=load_runtime, workspace=Path("/workspac
         for message in job.get("prior_messages", [])[-30:]:
             if isinstance(message, dict) and message.get("role") in {"user", "assistant"} and isinstance(message.get("content"), str):
                 history.append({"role": message["role"], "content": public_answer(message["content"])})
+        phase = "execution_failed"
         result = agent.run_conversation(prompt, system_message=system, conversation_history=history)
         if not isinstance(result, dict) or result.get("failed") or result.get("error") or result.get("interrupted") or not result.get("completed"):
-            return {"status": "failed", "answer": FAILURE_ANSWER}
+            return outcome("failed", FAILURE_ANSWER, "model_failed")
         answer = public_answer(result.get("final_response"))
-        return {"status": "completed", "answer": answer or "Task completed. See the attached artifacts."}
+        return outcome("completed", answer or "Task completed. See the attached artifacts.")
     except Exception as exc:
         print("Peter worker failed: " + type(exc).__name__, file=sys.stderr)
-        return {"status": "failed", "answer": FAILURE_ANSWER}
+        return outcome("failed", FAILURE_ANSWER, phase)
     finally:
         if agent is not None:
             try:
