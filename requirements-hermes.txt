@@ -1,0 +1,4 @@
+# Hermes intentionally disallows wheels; pinned source is installed editable, then protected by a read-only container root.
+# Official Hermes v2026.9.11; core includes terminal and file tools (no extras).
+# Keep the revision synchronized with peterbot/hermes_worker.py and adapter tests.
+-e git+https://github.com/NousResearch/hermes-agent.git@939e45c91d751fadd94dcd1b873ac3cb44846213#egg=hermes-agent

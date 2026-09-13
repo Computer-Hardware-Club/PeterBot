@@ -1,0 +1,9 @@
+# Only this trusted supervisor receives the Docker socket, on a control-only network.
+FROM docker:28.4.0-cli AS docker_cli
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker
+RUN python -m pip install --no-cache-dir aiohttp==3.12.15
+COPY peterbot/__init__.py peterbot/sandbox_runner.py ./peterbot/
+ENTRYPOINT ["python", "-m", "peterbot.sandbox_runner"]

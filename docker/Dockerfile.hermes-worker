@@ -1,0 +1,14 @@
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HERMES_SAFE_MODE=1
+RUN apt-get update && apt-get install -y --no-install-recommends git bash nodejs npm ripgrep ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements-hermes.txt ./
+RUN python -m pip install --no-cache-dir --src /opt/upstream -r requirements-hermes.txt
+COPY peterbot/__init__.py peterbot/hermes_worker.py ./peterbot/
+# Isolated Python (-I) must import trusted application code, never workspace code.
+RUN python -c "import site,pathlib; pathlib.Path(site.getsitepackages()[0], 'peterbot.pth').write_text('/app\\n')" \
+    && mkdir -p /workspace && chown 10000:10000 /workspace
+USER 10000:10000
+WORKDIR /workspace
+ENTRYPOINT ["python", "-I", "-m", "peterbot.hermes_worker"]
