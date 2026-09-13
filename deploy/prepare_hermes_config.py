@@ -14,7 +14,7 @@ def prepare(source: Path, output: Path, persona: Path) -> None:
         'chat_template_kwargs':{'enable_thinking':True}}
     inference['max_tokens']=4096
     inference['timeout_seconds']=120
-    config.setdefault('agent',{}).update(max_total_tokens=12288,request_timeout_seconds=180)
+    config.setdefault('agent',{}).update(max_total_tokens=8192,request_timeout_seconds=120)
     output.write_text(json.dumps(config,indent=2)+'\n')
 
 

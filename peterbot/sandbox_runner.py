@@ -241,7 +241,7 @@ def safe_tar_files(data: bytes, *, byte_limit=MAX_ARTIFACT_BYTES, file_limit=MAX
 def encode_artifacts(files: dict[str, bytes]) -> list[dict[str, str]]:
     if not files:
         return []
-    if len(files) > 3:
+    if len(files) > 3 or any("/" in name for name in files):
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as bundle:
             for name, content in files.items():

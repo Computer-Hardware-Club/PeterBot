@@ -415,3 +415,12 @@ def test_tmpfs_result_reader_is_bounded_regular_file_only(tmp_path, kind):
     else:
         assert result.returncode != 0
         assert result.stdout == b""
+
+
+def test_nested_artifacts_are_bundled_to_preserve_project_paths():
+    files={"site/index.html":b'<link href="assets/style.css">',"site/assets/style.css":b'body { color: blue; }'}
+    result=sr.encode_artifacts(files)
+    assert len(result)==1 and result[0]['name']=='peter-artifacts.zip'
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(result[0]['data_base64']))) as archive:
+        assert set(archive.namelist())==set(files)
+        assert archive.read('site/assets/style.css')==files['site/assets/style.css']

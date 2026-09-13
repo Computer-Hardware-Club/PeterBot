@@ -68,7 +68,10 @@ class HermesGateway:
         self.bot, self.config, self.settings = bot, config, settings
         self.policy = AgentPolicy(settings.allowed_guild_ids, settings.officer_role_ids,
                                   settings.owner_user_ids, settings.officer_only)
-        self.jobs = JobStore(str(Path(settings.state_dir) / 'tasks.sqlite3'))
+        state_dir=Path(settings.state_dir)
+        state_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
+        state_dir.chmod(0o700)
+        self.jobs = JobStore(str(state_dir / 'tasks.sqlite3'))
         self.memory = ScopedMemoryStore(str(Path(settings.state_dir) / 'memory.sqlite3'), self.policy)
         self.tools = ToolExecutor(config.agent.search_base_url)
         self.capabilities: dict[str, Capability] = {}

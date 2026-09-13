@@ -3,6 +3,7 @@ services:
   peterbot:
     image: ${PETERBOT_GATEWAY_IMAGE:?Set a built gateway image}
     container_name: peterbot
+    stop_grace_period: 45s
     restart: unless-stopped
     user: '10000:10000'
     environment:
