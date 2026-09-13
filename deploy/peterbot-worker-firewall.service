@@ -1,0 +1,13 @@
+[Unit]
+Description=Prevent Peter task containers from accessing p910 host services
+After=docker.service
+Requires=docker.service
+Before=peterbot-hermes.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /mnt/NVME/docker/appdata/peterbot/deploy/hermes-firewall.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

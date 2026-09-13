@@ -215,6 +215,9 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             channel_profiles=len(runtime.knowledge_index.channel_profiles),
         )
 
+        if getattr(runtime, "hermes", None) is not None:
+            await runtime.hermes.start()
+
         if not runtime.has_initialized:
             runtime.reminder_manager.load_reminders()
             await check_missed_reminders(
@@ -240,8 +243,34 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
         if message.author.bot:
             return
 
+        if getattr(runtime,"hermes",None) is not None and message.guild and isinstance(message.channel,discord.Thread):
+            previous=runtime.hermes.jobs.latest_for_thread(message.guild.id,message.author.id,message.channel.id)
+            if previous:
+                from .agent_policy import PolicyDenied
+                try:
+                    await runtime.hermes.submit(guild_id=message.guild.id,user_id=message.author.id,
+                        channel=message.channel,source_message_id=message.id,prompt=message.content,
+                        parent_id=previous['id'],attachments=message.attachments,allow_active_parent=True)
+                except (ValueError,PolicyDenied) as exc:
+                    await send_chunked_reply(message,str(exc))
+                return
+
         if bot.user and bot.user in message.mentions:
             content = build_current_mention_prompt_text(message, bot_user_id=bot.user.id)
+            if getattr(runtime, "hermes", None) is not None and await runtime.hermes.eligible(
+                getattr(message.guild,"id",None),message.author.id,message.channel.id
+            ):
+                from .hermes_commands import task_link
+                from .agent_policy import PolicyDenied
+                try:
+                    job = await runtime.hermes.submit(guild_id=message.guild.id,user_id=message.author.id,
+                        channel=message.channel,source_message_id=message.id,prompt=content,attachments=message.attachments)
+                    await send_chunked_reply(message,"I’ve queued your task: "+task_link(job))
+                except (ValueError,PolicyDenied) as exc:
+                    await send_chunked_reply(message,str(exc))
+                except discord.HTTPException:
+                    await send_chunked_reply(message,"I couldn’t create a private task thread here. Try /task in a server text channel.")
+                return
             admitted, reason = runtime.request_guard.acquire(
                 user_id=message.author.id, guild_id=getattr(message.guild, "id", None), prompt=content,
             )
@@ -433,6 +462,14 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
     @bot.tree.command(name="ask", description="Ask Peter a question")
     @discord.app_commands.describe(prompt="Your question or prompt for Peter")
     async def ask(interaction: discord.Interaction, prompt: str) -> None:
+        agent_deferred = False
+        if getattr(runtime, "hermes", None) is not None:
+            await interaction.response.defer(ephemeral=True)
+            agent_deferred = True
+            if await runtime.hermes.eligible(getattr(interaction.guild,"id",None),interaction.user.id,interaction.channel_id):
+                from .hermes_commands import submit_interaction
+                await submit_interaction(runtime.hermes,interaction,prompt)
+                return
         admitted, reason = runtime.request_guard.acquire(
             user_id=interaction.user.id, guild_id=getattr(interaction.guild, "id", None), prompt=prompt,
         )
@@ -441,7 +478,8 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             return
         try:
             async with asyncio.timeout(config.agent.request_timeout_seconds):
-                await interaction.response.defer(ephemeral=True)
+                if not agent_deferred:
+                    await interaction.response.defer(ephemeral=True)
                 context_messages = await get_channel_context_messages(
                     interaction.channel,
                     bot_user_id=getattr(bot.user, "id", None),

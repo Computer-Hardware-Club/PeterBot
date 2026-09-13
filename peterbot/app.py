@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from datetime import timedelta
@@ -102,6 +103,17 @@ def run_bot() -> None:
 
     bot = create_bot()
     runtime = build_runtime(bot, config)
+    if os.getenv("PETERBOT_HERMES_CONFIG"):
+        from .hermes_settings import HermesSettings
+        from .hermes_gateway import HermesGateway
+        from .hermes_commands import register_agent_commands
+        runtime.hermes = HermesGateway(bot, config, HermesSettings.load(os.environ["PETERBOT_HERMES_CONFIG"]))
+        register_agent_commands(bot, runtime.hermes)
+        original_close = bot.close
+        async def close_with_agent():
+            await runtime.hermes.close()
+            await original_close()
+        bot.close = close_with_agent
     register_handlers(bot, runtime)
     register_signal_handlers(runtime)
 

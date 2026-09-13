@@ -1,0 +1,75 @@
+# Copy to the deployment directory. Secrets and production JSON stay outside Git.
+services:
+  peterbot:
+    image: ${PETERBOT_GATEWAY_IMAGE:?Set a built gateway image}
+    container_name: peterbot
+    restart: unless-stopped
+    user: '10000:10000'
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN}
+      LLAMA_CPP_API_KEY: ${LLAMA_CPP_API_KEY:-}
+      PETERBOT_CONFIG_FILE: /app/config.json
+      PETERBOT_HERMES_CONFIG: /app/hermes.json
+      PETERBOT_RUNNER_TOKEN: ${PETERBOT_RUNNER_TOKEN}
+    volumes:
+      - ${PETERBOT_APPDATA:?Set appdata}/config.production.json:/app/config.json:ro
+      - ${PETERBOT_APPDATA}/hermes.production.json:/app/hermes.json:ro
+      - ${PETERBOT_APPDATA}/data:/app/peterbot-data
+      - ${PETERBOT_APPDATA}/logs:/app/logs
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=64m']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 768m
+    cpus: 1
+    pids_limit: 128
+    networks:
+      control: {}
+      workers:
+        ipv4_address: 172.30.91.2
+        aliases: [gateway]
+    depends_on:
+      runner:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import json,urllib.request; assert json.load(urllib.request.urlopen('http://127.0.0.1:8770/health',timeout=4))['status']=='ok'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+  runner:
+    image: ${PETERBOT_RUNNER_IMAGE:?Set a built runner image}
+    container_name: peterbot-hermes-runner
+    restart: unless-stopped
+    environment:
+      PETERBOT_RUNNER_TOKEN: ${PETERBOT_RUNNER_TOKEN}
+      PETERBOT_WORKER_IMAGE: ${PETERBOT_WORKER_IMAGE:?Set a built worker image}
+      PETERBOT_WORKER_NETWORK: peterbot_workers
+      PETERBOT_RUNNER_SCOPE: peterbot
+      PETERBOT_RUNNER_CONCURRENCY: 1
+      PETERBOT_RUNNER_TIMEOUT: 1230
+    # Trusted supervisor only. Worker containers never receive this socket.
+    volumes: ['/var/run/docker.sock:/var/run/docker.sock']
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=64m']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    networks: [control]
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8780/health',timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+networks:
+  control:
+    name: peterbot_control
+  workers:
+    name: peterbot_workers
+    internal: true
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.30.91.0/24
