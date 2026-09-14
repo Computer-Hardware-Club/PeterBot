@@ -21,7 +21,8 @@ async def main():
     os.environ['DISCORD_TOKEN']='deployment-smoke-unused-no-discord-connection'
     config=AppConfig.load()
     settings=HermesSettings.load(os.environ['PETERBOT_HERMES_CONFIG'])
-    settings=replace(settings,state_dir=os.environ['PETERBOT_SMOKE_STATE'])
+    settings=replace(settings,state_dir=os.environ['PETERBOT_SMOKE_STATE'],tool_service_url=os.getenv('PETERBOT_SMOKE_TOOL_URL',settings.tool_service_url))
+    conversational=os.getenv('PETERBOT_SMOKE_CONVERSATION')=='1'
     guild_id=next(iter(settings.allowed_guild_ids)); user_id=123456789012345678
     role_id=next(iter(settings.officer_role_ids)); channel_id=123456789012345679
     class Channel:
@@ -65,8 +66,10 @@ async def main():
             'Use peter_memory_add to save a personal preference: deployment smoke prefers concise answers. '
             'Then use peter_memory_search to verify it. Return a concise final answer with both arithmetic results. '
             'Do not contact Discord or any person. No web search is needed.')
+        if conversational:
+            prompt='Read numbers.csv, calculate 137*29, and give me a text file with that result and the sum of the amount column. Keep your reply short.'
         job=gateway.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel_id,
-            source_message_id=123456789012345680,prompt=prompt,
+            source_message_id=123456789012345680,prompt=prompt,delivery_mode='channel' if conversational else 'private',
             input_files=[{'name':'numbers.csv','data_base64':base64.b64encode(b'amount\n10\n20\n30\n').decode()}])
         gateway.jobs.update(job['id'],status='running')
         await gateway.run_job(gateway.jobs.get(job['id']))
@@ -78,7 +81,9 @@ async def main():
         print(json.dumps(public,indent=2),flush=True)
         assert result['status']=='completed',public
         assert artifacts and any('3973' in base64.b64decode(f['data_base64']).decode(errors='replace') for f in artifacts),public
-        assert public['memory_count']>0,public
+        assert (public['memory_count']==0 if conversational else public['memory_count']>0),public
+        if conversational:
+            assert len(result['answer'])<1200,public
     finally:
         await server.cleanup(); await gateway.session.close(); await gateway.tools.close()
 

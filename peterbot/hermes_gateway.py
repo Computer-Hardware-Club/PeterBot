@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,20 @@ from .tools import ToolExecutor
 from .prompts import strip_think_blocks
 
 log = logging.getLogger(__name__)
+
+
+def attachment_answer(text: str, serialized_artifacts: str) -> str:
+    """Discord receives attachments, not links to files inside a container."""
+    try:
+        files=json.loads(serialized_artifacts)
+        names={item['name'] for item in files if isinstance(item,dict) and isinstance(item.get('name'),str)}
+    except (ValueError,TypeError):
+        return text
+    def replace_link(match):
+        name=match.group(1)
+        return '`'+Path(name).name+'`' if name in names else match.group(0)
+    text=re.sub(r'\[[^\]]*\]\((?:file://)?/workspace/artifacts/([^\)]+)\)',replace_link,text)
+    return re.sub(r'(?:file://)?/workspace/artifacts/([^\s`<>\)]+)',replace_link,text)
 
 
 async def read_bounded(stream, limit: int) -> bytes:
@@ -443,7 +458,7 @@ class HermesGateway:
         try:
             await self.principal(job['guild_id'],job['user_id'],job['channel_id'])
             channel = await self.bot.fetch_channel(job['channel_id'])
-            text = job['answer']
+            text = attachment_answer(job['answer'],job['artifacts'])
             conversational=job.get('delivery_mode','private')=='channel'
             from .context import split_for_discord
             parts = [('text',chunk) for chunk in split_for_discord(text,1800)]

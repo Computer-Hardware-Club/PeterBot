@@ -292,7 +292,8 @@ def run_job(job: dict, *, runtime_loader=load_runtime, workspace=Path("/workspac
                 "that this particular request needs. Then reply to the original question naturally, usually in "
                 "one to three sentences. Do not narrate steps, list tools or checks, announce completion, "
                 "explain the sandbox, or append unsolicited offers. Give more detail only if requested or "
-                "essential. Attach requested deliverables without dumping their contents into chat. "
+                "essential. Deliverables are attached automatically: do not print file:// links or sandbox paths. "
+                "Refer to a filename only if helpful; do not dump file contents into chat. "
                 "Only public club memory is available here; personal memory is not available."
             )
         agent = agent_class(base_url=job.get("base_url") or os.environ.get("HERMES_BASE_URL", service_url.rstrip("/") + "/v1"),

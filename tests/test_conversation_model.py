@@ -41,3 +41,13 @@ def test_tool_handoff_returns_no_premature_answer():
 def test_unknown_or_malformed_decisions_fail_without_actions(message):
     with pytest.raises(ValueError):
         run(message)
+
+
+@pytest.mark.parametrize('text',[
+    'Here: file:///workspace/artifacts/results.txt',
+    'Here: [download](/workspace/artifacts/results.txt)',
+    'Here: /workspace/artifacts/results.txt',
+])
+def test_deliverables_use_attachment_names_not_sandbox_links(text):
+    from peterbot.hermes_gateway import attachment_answer
+    assert attachment_answer(text,'[{"name":"results.txt"}]')=='Here: `results.txt`'
