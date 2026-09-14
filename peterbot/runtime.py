@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
@@ -8,6 +8,7 @@ from .config import AppConfig
 from .knowledge import KnowledgeIndex
 from .llama_cpp_client import LlamaCppChatClient
 from .reminders import ReminderManager
+from .guardrails import GuardLimits, RequestGuard
 
 
 @dataclass
@@ -18,5 +19,7 @@ class PeterBotRuntime:
     reminder_manager: ReminderManager
     knowledge_index: KnowledgeIndex
     retry_delay: timedelta
+    request_guard: RequestGuard = field(default_factory=lambda: RequestGuard(GuardLimits()))
+    hermes: Any = None
     has_initialized: bool = False
     has_synced_commands: bool = False

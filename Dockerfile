@@ -30,6 +30,8 @@ USER peterbot
 ENTRYPOINT ["/usr/bin/tini", "--", "./docker/entrypoint.sh"]
 
 FROM base AS bot
+ARG PETERBOT_REVISION=unknown
+LABEL org.opencontainers.image.revision=$PETERBOT_REVISION
 
 FROM ghcr.io/ggml-org/llama.cpp:server AS llama_cpp_server
 

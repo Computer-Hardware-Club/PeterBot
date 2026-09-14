@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from datetime import timedelta
@@ -18,13 +19,14 @@ from .llama_cpp_client import LlamaCppChatClient
 from .logging_utils import configure_logging, log_exception_with_context, log_with_context, set_logging_flags
 from .reminders import ReminderManager
 from .runtime import PeterBotRuntime
+from .guardrails import GuardLimits, RequestGuard
 
 
 def create_bot() -> commands.Bot:
     intents = discord.Intents.default()
     intents.message_content = True
     intents.members = True
-    return commands.Bot(command_prefix="!", intents=intents)
+    return commands.Bot(command_prefix="!", intents=intents, allowed_mentions=discord.AllowedMentions.none())
 
 
 def build_runtime(bot: commands.Bot, config: AppConfig) -> PeterBotRuntime:
@@ -39,6 +41,14 @@ def build_runtime(bot: commands.Bot, config: AppConfig) -> PeterBotRuntime:
         reminder_manager=ReminderManager(data_dir=config.data_dir),
         knowledge_index=knowledge_index,
         retry_delay=timedelta(minutes=config.reminder_retry_minutes),
+        request_guard=RequestGuard(GuardLimits(
+            max_concurrent=config.agent.max_concurrent,
+            user_requests_per_minute=config.agent.user_requests_per_minute,
+            guild_requests_per_minute=config.agent.guild_requests_per_minute,
+            max_prompt_chars=config.agent.max_prompt_chars,
+            allowed_guild_ids=config.agent.allowed_guild_ids,
+            allow_dms=config.agent.allow_dms,
+        )),
     )
 
 
@@ -93,6 +103,17 @@ def run_bot() -> None:
 
     bot = create_bot()
     runtime = build_runtime(bot, config)
+    if os.getenv("PETERBOT_HERMES_CONFIG"):
+        from .hermes_settings import HermesSettings
+        from .hermes_gateway import HermesGateway
+        from .hermes_commands import register_agent_commands
+        runtime.hermes = HermesGateway(bot, config, HermesSettings.load(os.environ["PETERBOT_HERMES_CONFIG"]))
+        register_agent_commands(bot, runtime.hermes)
+        original_close = bot.close
+        async def close_with_agent():
+            await runtime.hermes.close()
+            await original_close()
+        bot.close = close_with_agent
     register_handlers(bot, runtime)
     register_signal_handlers(runtime)
 

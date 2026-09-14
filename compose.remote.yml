@@ -1,0 +1,20 @@
+# Remote model deployment. Set config.json inference/agent endpoints before use.
+services:
+  peterbot:
+    build:
+      context: .
+      target: bot
+    image: peterbot:remote
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PETERBOT_CONFIG_FILE: /app/config.json
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./peterbot-data:/app/peterbot-data
+      - ./logs:/app/logs
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # No host ports or Docker socket; the bot makes outbound connections only.
