@@ -7,12 +7,10 @@ import aiohttp
 import discord
 import pytest
 
-import peterbot.commands as commands
 from peterbot.agent_policy import PolicyDenied, Principal
 from peterbot.hermes_commands import register_agent_commands, submit_interaction
-from test_command_admission import FakeBot
+from test_command_admission import FakeBot, setup_handlers
 from test_hermes_gateway import capability, gateway_client
-from test_llama_cpp_client import build_config
 
 
 def interaction(*, guild_id=10, user_id=1, channel_id=20):
@@ -75,21 +73,21 @@ def test_continue_command_preserves_actor_and_parent_task():
     request.response.defer.assert_awaited_once_with(ephemeral=True)
 
 
-def test_ask_defers_before_hermes_membership_network_lookup(tmp_path):
-    async def scenario():
-        bot, request = FakeBot(), interaction()
+def test_ask_defers_before_normal_chat_and_never_creates_a_task(setup_handlers):
+    bot, runtime = setup_handlers
+    from test_command_admission import interaction as chat_interaction
+    request = chat_interaction()
+    runtime.hermes = SimpleNamespace(eligible=AsyncMock(), submit=AsyncMock())
 
-        async def eligible(*args):
-            assert request.response.done, "Discord eligibility lookup ran before defer"
-            return True
-
-        service = SimpleNamespace(eligible=eligible, submit=AsyncMock(return_value={"id": "job", "guild_id": 10, "channel_id": 99}))
-        runtime = SimpleNamespace(config=build_config(tmp_path), hermes=service)
-        commands.register_handlers(bot, runtime)
-        await bot.tree.callbacks["ask"](request, "long task")
+    async def chat(**kwargs):
         request.response.defer.assert_awaited_once_with(ephemeral=True)
+        return "Just chatting."
 
-    asyncio.run(scenario())
+    runtime.llm_client.call_chat.side_effect = chat
+    asyncio.run(bot.tree.callbacks["ask"](request, "Tell me a joke"))
+    runtime.hermes.eligible.assert_not_awaited()
+    runtime.hermes.submit.assert_not_awaited()
+    runtime.llm_client.call_chat.assert_awaited_once()
 
 
 def task_channels(gateway):
@@ -262,7 +260,7 @@ def test_malformed_artifact_cannot_poison_queue_or_repeat_answer(tmp_path):
                 for pending in gateway.jobs.undelivered():
                     await gateway.deliver(pending)
             sent_answers = [call.args[0] for call in thread.send.await_args_list
-                            if call.args and call.args[0].startswith("Task `")]
+                            if call.args and call.args[0] == "the answer"]
             assert len(sent_answers) == 1
             assert gateway.jobs.undelivered() == []
 

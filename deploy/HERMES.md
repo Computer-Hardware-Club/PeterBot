@@ -14,18 +14,20 @@ The worker only receives a short-lived capability for its job. The gateway verif
 
 ## Discord pilot
 
-`officer_only: true` enables Hermes for configured officer role IDs. Member mentions and `/ask` keep the existing bounded chat path. Explicit `/task` requests from members explain the pilot restriction.
+Ordinary mentions are conversational: Peter answers in the original channel without creating a thread or showing task IDs/status messages. A short model turn decides whether tools are needed. If so, work runs quietly in the existing sandbox and the useful answer/files are returned as a reply to the original message. Shared-channel workers receive public club memory and same-requester context only; personal memory is unavailable, including ID-based updates/deletes. Social context from other speakers stays in the conversational turn and is not sent to sandbox tools.
+
+`officer_only: true` preserves the current tool pilot for configured officer role IDs. Member mentions and `/ask` keep the existing bounded conversational path. Explicit `/task` remains an optional private workspace, never the default for pings.
 
 - `/task prompt [attachment]`: start work in a new private, non-invitable task thread.
-- `/ask` and mentions from officers also start tasks.
-- Messages from the task owner in a task thread queue a follow-up. A running task finishes first; cancellation is explicit.
+- `/ask` stays a private conversational answer. Officer mentions use the conversational/tool-routing path above.
+- Private work is explicitly continued through `/continue_task`; ordinary thread messages are not automatically converted into tasks.
 - `/tasks`: list your task IDs and statuses.
 - `/cancel_task task_id`: revoke the task and request immediate container termination.
 - `/continue_task task_id prompt`: continue a finished/interrupted task in its original private thread.
 - `/memory scope query`: privately inspect personal/public club memory.
 - `/forget memory_id version`: remove an authorized memory from recall. Restricted audit revisions remain.
 
-Discord server administrators and members with Manage Threads may be able to access private threads; they are not confidential from server administration. Task ownership still prevents another user from taking over a task. The pilot accepts at most three UTF-8 text/code attachments totaling 128 KiB (one attachment in `/task`, multiple through mentions/follow-ups). Generated artifacts total at most 8 MiB. Images, Office/PDF uploads, arbitrary internet/package access, outbound messaging tools, server administration, native global memory/session search, cron and subagents are not exposed yet.
+For explicitly requested private tasks, Discord server administrators and members with Manage Threads may be able to access private threads; they are not confidential from server administration. Task ownership still prevents another user from taking over a task. The pilot accepts at most three UTF-8 text/code attachments totaling 128 KiB (one attachment in `/task`, multiple through mentions/follow-ups). Generated artifacts total at most 8 MiB. Images, Office/PDF uploads, arbitrary internet/package access, outbound messaging tools, server administration, native global memory/session search, cron and subagents are not exposed yet.
 
 One agent task runs at a time. At most two tasks per user and 20 globally may be pending. Default limits are 20 minutes per task, 30 Hermes iterations, 8192 tokens per response, and a total allocated output budget of 131072 tokens. Thinking is enabled by the trusted model proxy regardless of caller flags. These are independent of legacy member-chat budgets. `deploy/prepare_hermes_config.py` generates a bot config with the stable persona, thinking enabled for member chat too, a 4096-token response allowance and a 120-second legacy request limit. Preserve a backup before replacing production JSON.
 

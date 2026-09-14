@@ -31,3 +31,7 @@ No member can write club memory, impersonate another actor, retrieve another mem
 ## Later capability gates
 
 A separate VM for untrusted execution remains the preferred stronger host boundary; a restricted Docker pilot is the first milestone and shares the host kernel. General browser automation, broader network/package access, private officer knowledge, outbound club actions, scheduled agent tasks, and delegation require explicit scoped implementations and verification. Native upstream features are not automatically exposed merely because Hermes supports them.
+
+## Conversational correction
+
+Normal pings no longer open task threads. Peter answers brief conversation directly, and only starts quiet sandbox work when the model identifies a need for tools. Replies and requested files return to the original message. `/ask` remains ordinary private chat; `/task` is optional. Shared-channel delivery excludes personal memory and private task history. Tone is casual and proportional, with no unsolicited task reports or capability menus.

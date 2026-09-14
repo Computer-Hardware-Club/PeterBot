@@ -25,7 +25,7 @@ class JobStore:
             answer TEXT NOT NULL DEFAULT '', artifacts TEXT NOT NULL DEFAULT '[]',
             delivered INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
         columns = {r[1] for r in self.db.execute('PRAGMA table_info(jobs)')}
-        for name, definition in {'input_files':"TEXT NOT NULL DEFAULT '[]'", 'delivery_cursor':'INTEGER NOT NULL DEFAULT 0'}.items():
+        for name, definition in {'input_files':"TEXT NOT NULL DEFAULT '[]'", 'delivery_cursor':'INTEGER NOT NULL DEFAULT 0', 'delivery_mode':"TEXT NOT NULL DEFAULT 'private'", 'context':"TEXT NOT NULL DEFAULT '[]'"}.items():
             if name not in columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
         with self.db:
@@ -33,15 +33,17 @@ class JobStore:
             self.db.execute("UPDATE jobs SET status='interrupted', answer='The gateway restarted during this task. Use /continue_task to resume from the saved objective.', updated_at=? WHERE status='running'", (now(),))
 
     def create(self, *, guild_id: int, user_id: int, channel_id: int,
-               source_message_id: int, prompt: str, parent_id: str | None = None, input_files: list | None = None, ready: bool = True) -> dict:
+               source_message_id: int, prompt: str, parent_id: str | None = None, input_files: list | None = None, ready: bool = True, delivery_mode: str = 'private', context: list | None = None) -> dict:
         if not prompt.strip() or len(prompt) > 16000:
             raise ValueError('Please use a task description between 1 and 16,000 characters.')
+        if delivery_mode not in {'private','channel'}:
+            raise ValueError('Invalid delivery mode')
         self.check_capacity(user_id)
         job_id = uuid.uuid4().hex
         with self.db:
             self.db.execute('INSERT INTO jobs (id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
                             (job_id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,'queued' if ready else 'preparing',now(),now()))
-            self.db.execute('UPDATE jobs SET input_files=? WHERE id=?',(json.dumps(input_files or []),job_id))
+            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=? WHERE id=?',(json.dumps(input_files or []),delivery_mode,json.dumps(context or []),job_id))
         return self.get(job_id)
 
     def check_capacity(self, user_id: int) -> None:
@@ -51,8 +53,15 @@ class JobStore:
             raise ValueError('The task queue is full for now. Finish or cancel an existing task first.')
 
     def latest_for_thread(self, guild_id: int, user_id: int, channel_id: int) -> dict | None:
-        row=self.db.execute('SELECT * FROM jobs WHERE guild_id=? AND user_id=? AND channel_id=? ORDER BY created_at DESC LIMIT 1',(guild_id,user_id,channel_id)).fetchone()
+        row=self.db.execute("SELECT * FROM jobs WHERE guild_id=? AND user_id=? AND channel_id=? AND delivery_mode='private' ORDER BY created_at DESC LIMIT 1",(guild_id,user_id,channel_id)).fetchone()
         return dict(row) if row else None
+
+    def conversation_context(self, guild_id: int, user_id: int, channel_id: int) -> list[dict]:
+        rows=self.db.execute("SELECT prompt,answer FROM jobs WHERE guild_id=? AND user_id=? AND channel_id=? AND delivery_mode='channel' AND status='completed' AND julianday(created_at)>=julianday('now','-1 hour') ORDER BY created_at DESC LIMIT 3",(guild_id,user_id,channel_id)).fetchall()
+        result=[]
+        for row in reversed(rows):
+            result.extend([{'role':'user','content':row['prompt'][:2000]}, {'role':'assistant','content':row['answer'][:2000]}])
+        return result
 
     def get(self, job_id: str) -> dict | None:
         row = self.db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
