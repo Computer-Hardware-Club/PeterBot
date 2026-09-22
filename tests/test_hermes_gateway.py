@@ -311,6 +311,46 @@ def test_model_proxy_fixes_upstream_model_thinking_credentials_and_flags(tmp_pat
     asyncio.run(scenario())
 
 
+def test_concurrent_model_calls_for_one_task_wait_instead_of_failing(tmp_path):
+    """A client retry that races the tail of the previous call must be serialized, not
+    rejected with a 429 that kills the task."""
+
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            capability(gateway)
+            body = {"messages": [{"role": "user", "content": "solve this"}]}
+            first, second = await asyncio.gather(
+                client.post("/v1/chat/completions", headers=headers(), json=body),
+                client.post("/v1/chat/completions", headers=headers(), json=body),
+            )
+            assert (first.status, second.status) == (200, 200)
+            # Both reached the upstream, one after the other.
+            assert len(gateway.session.calls) == 2
+            assert not gateway.capabilities["valid"].lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_a_wedged_model_lock_still_refuses_rather_than_queueing_forever(tmp_path, monkeypatch):
+    import peterbot.hermes_gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "MODEL_LOCK_WAIT_SECONDS", 0.05)
+
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cap = capability(gateway)
+            await cap.lock.acquire()  # a call that never returns
+            try:
+                response = await client.post("/v1/chat/completions", headers=headers(),
+                                             json={"messages": [{"role": "user", "content": "hi"}]})
+                assert response.status == 429
+                assert gateway.session.calls == []
+            finally:
+                cap.lock.release()
+
+    asyncio.run(scenario())
+
+
 def test_model_and_tool_budgets_stop_dispatch_before_upstream_calls(tmp_path):
     async def scenario():
         async with gateway_client(tmp_path) as (gateway, client):

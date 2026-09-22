@@ -55,6 +55,18 @@ The worker sets an explicit `HERMES_API_CALL_STALE_TIMEOUT` (600 seconds) before
 
 A heavy task can still exceed the 20-minute job budget, because the deployed model decodes at roughly 15-20 tokens per second and a coding task spends minutes reasoning. That ends as an honest `timeout` with the artifacts collected, not as a model error. The same limit decides whether a member's long request should hand off early rather than be attempted in the conversational turn.
 
+## Presence: one message that becomes the answer
+
+`presence.py` owns at most one member-facing message per turn. Discord's typing indicator refreshes itself for as long as the `typing()` context is open (discord.py re-sends it every five seconds), but it carries no information and nothing holds it open while a sandbox task runs. Presence fills that gap:
+
+- A turn that finishes quickly posts nothing, so ordinary banter never flashes a placeholder. The status message appears only after `STATUS_AFTER_SECONDS` (6), and edits are throttled to `MIN_EDIT_SECONDS` (3).
+- The status message is edited in place as work continues and finally *becomes* the answer, so the channel shows one message rather than a stale placeholder above a reply. Answers longer than one message edit the first chunk in and send the rest.
+- A handoff announces itself immediately, because the member is about to wait minutes for another process, and the message id is stored on the job (`status_message_id`) so delivery still finds it after a gateway restart.
+- While a task runs, `report_progress` refreshes the line every `PROGRESS_EVERY_SECONDS` (20) with elapsed time and stage. The worker does not stream progress, so only those two honest facts are reported — there is deliberately no percentage.
+- Every presence failure is logged and swallowed: a deleted message, a lost permission or a failed post must never fail the turn or lose the answer. If the status message cannot be used, delivery falls back to an ordinary reply.
+
+Verification: `deploy/smoke_presence.py` runs the real `run_job` and `deliver` against a recording channel with a real model, runner and worker, and prints the send/edit transcript a member would see.
+
 ## Persistence and delivery
 
 The appdata `data/hermes` directory stores `tasks.sqlite3` and `memory.sqlite3`. Back up their directory with the service stopped or SQLite's backup API. Do not copy individual live WAL database files in isolation. Queued jobs survive restart; in-flight jobs are marked interrupted and can be explicitly continued. The previous objective, final response and input files carry into a continuation; a disposable filesystem and full tool execution stack do not. Agent steps are not transparently replayed after a crash.
@@ -78,6 +90,8 @@ Three smoke scripts, in increasing distance from the sandbox:
 - `deploy/smoke_hermes.py`: task path. Needs the runner and a disposable gateway container on both networks, alias `gateway`, worker address `192.168.240.2`. Stop the production gateway while it holds that address.
 - `deploy/smoke_conversation.py`: same, with `PETERBOT_SMOKE_CONVERSATION=1` for the public conversation delivery mode.
 - `deploy/smoke_conversation_turn.py`: the fast conversational turn against the live model, no runner or worker needed (control network only). Six prompts covering banter, club facts, arithmetic, tool-needing requests and a file request. Every case must return reply text or a deliberate handoff, with no raised exception and no internal string in the reply. Run this after any change to `conversation.py`, the persona, or the knowledge file.
+- `deploy/smoke_presence.py`: presence and delivery. Drives the real `run_job` and `deliver` with a recording channel: one status message must appear, be edited while the task runs, finally hold the answer, and artifacts must arrive as their own messages. Needs the runner and the worker address, like `smoke_hermes.py`.
+- `deploy/run_sandbox_task.py`: reproduction tool, not a pass/fail smoke. Runs one prompt through the runner and prints every model call's status, duration, reasoning size and tool names plus the final outcome and artifacts.
 
 Note that a handoff for "who are the current club officers?" is correct: that answer needs the live roster tool, not the static knowledge file.
 

@@ -25,6 +25,10 @@ from .knowledge import KnowledgeIndex, build_knowledge_excerpt
 from .tools import ToolExecutor
 from .prompts import strip_think_blocks
 
+# A per-task model call serializes its peers instead of failing them instantly: a client
+# retry that races the tail of the previous attempt must wait, not die with a 429.
+MODEL_LOCK_WAIT_SECONDS = 60.0
+
 log = logging.getLogger(__name__)
 
 
@@ -226,46 +230,58 @@ class HermesGateway:
     async def model(self, request):
         body = await asyncio.wait_for(request.json(), 10)
         cap, _ = await self.authenticate(request)
-        if cap.lock.locked():
-            raise web.HTTPTooManyRequests(text='Only one model request per task may run at once')
-        async with cap.lock:
-            if cap.model_calls >= self.settings.max_model_calls or cap.output_tokens >= self.settings.max_job_output_tokens:
-                raise web.HTTPTooManyRequests(text='Task model budget exhausted')
-            if not isinstance(body, dict) or not isinstance(body.get('messages'), list):
-                raise web.HTTPBadRequest(text='Invalid model request')
-            # Only known inference fields pass upstream. Worker cannot choose hosts,
-            # provider credentials, output files, model loaders, or extra request flags.
-            payload = {k: body[k] for k in ('messages','tools','tool_choice','temperature','top_p','stop') if k in body}
-            requested = body.get('max_tokens', self.settings.max_tokens)
-            if type(requested) is not int or requested < 1:
-                raise web.HTTPBadRequest(text='Invalid token budget')
-            token_limit = min(requested, self.settings.max_tokens,
-                              self.settings.max_job_output_tokens - cap.output_tokens)
-            payload.update(model=self.config.inference.model, stream=False, n=1,
-                           parallel_tool_calls=False, max_tokens=token_limit,
-                           chat_template_kwargs={'enable_thinking':True})
-            cap.model_calls += 1
-            cap.output_tokens += token_limit
-            base = self.config.inference.base_url.rstrip('/')
-            url = base + ('/chat/completions' if base.endswith('/v1') else '/v1/chat/completions')
-            headers = {}
-            if self.config.llama_cpp_api_key:
-                headers['Authorization'] = 'Bearer ' + self.config.llama_cpp_api_key
-            try:
-                # A reasoning model can spend minutes on one 8k-token sandbox call; the
-                # session-wide deadline is far too short for it.
-                model_timeout = max(60, min(self.settings.job_timeout, 600))
-                async with self.session.post(url,json=payload,headers=headers,allow_redirects=False,
-                                             timeout=aiohttp.ClientTimeout(total=model_timeout)) as response:
-                    data = await read_bounded(response.content, 4 * 1024 * 1024)
-                    if len(data) > 4 * 1024 * 1024 or response.status != 200:
-                        log.warning('Task inference failed: job=%s upstream_status=%s',cap.job['id'],response.status)
-                        raise web.HTTPBadGateway(text='Local model request failed')
-                    # Return normal completion JSON; worker owns reasoning parsing.
-                    result = json.loads(data)
-                    return web.json_response(result)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                raise web.HTTPBadGateway(text='Local model unavailable') from exc
+        # One live call per task, because the upstream is a reasoning model that must not be
+        # swamped. A concurrent call from the same task is normally a client retry that
+        # raced the previous attempt's tail, so wait for the lock rather than rejecting it:
+        # an instant 429 turns a scheduling hiccup into a dead task. Still bounded, so a
+        # genuinely wedged call cannot queue work forever.
+        try:
+            await asyncio.wait_for(cap.lock.acquire(), MODEL_LOCK_WAIT_SECONDS)
+        except asyncio.TimeoutError:
+            raise web.HTTPTooManyRequests(text='Only one model request per task may run at once') from None
+        try:
+            return await self._forward_model(body, cap)
+        finally:
+            cap.lock.release()
+
+    async def _forward_model(self, body, cap):
+        if cap.model_calls >= self.settings.max_model_calls or cap.output_tokens >= self.settings.max_job_output_tokens:
+            raise web.HTTPTooManyRequests(text='Task model budget exhausted')
+        if not isinstance(body, dict) or not isinstance(body.get('messages'), list):
+            raise web.HTTPBadRequest(text='Invalid model request')
+        # Only known inference fields pass upstream. Worker cannot choose hosts,
+        # provider credentials, output files, model loaders, or extra request flags.
+        payload = {k: body[k] for k in ('messages','tools','tool_choice','temperature','top_p','stop') if k in body}
+        requested = body.get('max_tokens', self.settings.max_tokens)
+        if type(requested) is not int or requested < 1:
+            raise web.HTTPBadRequest(text='Invalid token budget')
+        token_limit = min(requested, self.settings.max_tokens,
+                          self.settings.max_job_output_tokens - cap.output_tokens)
+        payload.update(model=self.config.inference.model, stream=False, n=1,
+                       parallel_tool_calls=False, max_tokens=token_limit,
+                       chat_template_kwargs={'enable_thinking':True})
+        cap.model_calls += 1
+        cap.output_tokens += token_limit
+        base = self.config.inference.base_url.rstrip('/')
+        url = base + ('/chat/completions' if base.endswith('/v1') else '/v1/chat/completions')
+        headers = {}
+        if self.config.llama_cpp_api_key:
+            headers['Authorization'] = 'Bearer ' + self.config.llama_cpp_api_key
+        try:
+            # A reasoning model can spend minutes on one 8k-token sandbox call; the
+            # session-wide deadline is far too short for it.
+            model_timeout = max(60, min(self.settings.job_timeout, 600))
+            async with self.session.post(url,json=payload,headers=headers,allow_redirects=False,
+                                         timeout=aiohttp.ClientTimeout(total=model_timeout)) as response:
+                data = await read_bounded(response.content, 4 * 1024 * 1024)
+                if len(data) > 4 * 1024 * 1024 or response.status != 200:
+                    log.warning('Task inference failed: job=%s upstream_status=%s',cap.job['id'],response.status)
+                    raise web.HTTPBadGateway(text='Local model request failed')
+                # Return normal completion JSON; worker owns reasoning parsing.
+                result = json.loads(data)
+                return web.json_response(result)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise web.HTTPBadGateway(text='Local model unavailable') from exc
 
     async def tool(self, request):
         body = await asyncio.wait_for(request.json(), 10)

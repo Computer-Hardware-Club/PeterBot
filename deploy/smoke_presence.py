@@ -74,28 +74,34 @@ class RecordingChannel:
 
 
 async def main():
+    # AppConfig.load() validates the Discord token; this smoke never connects to Discord.
+    os.environ.setdefault('DISCORD_TOKEN', 'presence-smoke-unused-no-discord-connection')
     settings = HermesSettings.load(os.environ['PETERBOT_HERMES_CONFIG'])
     settings = replace(settings, state_dir=os.environ['PETERBOT_SMOKE_STATE'])
     config = AppConfig.load()
+    # Use the real allowed guild and officer role, so policy checks behave as in production.
+    guild_id = next(iter(settings.allowed_guild_ids))
+    role_id = next(iter(settings.officer_role_ids))
+    user_id, channel_id = 123456789012345678, 123456789012345679
     channel = RecordingChannel()
-    guild = type('Guild', (), {'id': 10})()
+    guild = type('Guild', (), {'id': guild_id})()
     channel.guild = guild
     bot = type('Bot', (), {'user': type('U', (), {'id': 999})(),
-                           'get_guild': lambda guild_id: guild,
+                           'get_guild': lambda gid: guild,
                            'is_ready': lambda: True,
-                           'fetch_channel': staticmethod(lambda channel_id: asyncio.sleep(0, result=channel))})()
+                           'fetch_channel': staticmethod(lambda cid: asyncio.sleep(0, result=channel))})()
 
     gateway = HermesGateway(bot, config, settings)
 
     async def principal(guild_id, user_id, channel_id, *args, **kwargs):
-        return Principal(guild_id, user_id, channel_id, (100,))
+        return Principal(guild_id, user_id, channel_id, (role_id,))
     gateway.principal = principal
     gateway.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=240), trust_env=False)
 
     # The status line the member is already watching, exactly as respond_to_message posts it.
     status = await channel.send("on it — this needs real work, so give me a bit. I'll post the result here.")
 
-    job = gateway.jobs.create(guild_id=10, user_id=1, channel_id=20, source_message_id=30,
+    job = gateway.jobs.create(guild_id=guild_id, user_id=user_id, channel_id=channel_id, source_message_id=30,
                               prompt=PROMPT, delivery_mode='channel', status_message_id=status.id)
     gateway.jobs.update(job['id'], status='running')
     job = gateway.jobs.get(job['id'])
