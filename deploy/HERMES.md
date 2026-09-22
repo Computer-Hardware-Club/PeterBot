@@ -42,10 +42,18 @@ Reliability rules for that turn, all enforced in `conversation.py`:
 - A blank answer never starts sandbox work by itself: only an explicit handoff does.
 - A tool name or argument shape the fast model invented is treated as a handoff, not an error. The sandbox re-checks authority and honours only its own allowlist, so failing toward doing the work is the safe direction.
 - Only wall-clock that is actually left is spent: the turn honours `inference.timeout_seconds`, and the retry shares the remaining budget instead of getting a fresh one.
+- The deadline is sized for a reasoning model (420 seconds deployed). A hard question can spend minutes thinking before it emits a byte, and a shorter deadline turns that into a member-facing failure.
+- The thinking attempt is capped at `TOTAL_ATTEMPT_SECONDS` and holds back `RETRY_RESERVE_SECONDS` for the cheap retry, keeping at least half of what is left if the deadline is short. Attempts log their budget, so a slow turn is distinguishable from a dead one.
+- Requests stream, and a stream that goes quiet for `STREAM_IDLE_SECONDS` is treated as dead. Non-streamed, vLLM sends nothing until the whole completion is finished, so a total deadline cannot tell "still thinking" from "server gone" and always loses to a long turn.
+- The fast turn is told to decide promptly and hand off rather than attempt real work itself.
 
 Club facts come from `club-knowledge.md`, baked into the gateway image and loaded through `paths.knowledge_file`. The file must exist: a missing one fails config load rather than silently letting Peter answer club questions from guesses. Both the conversational turn and the sandbox persona receive the same excerpt.
 
 Sandbox model calls get their own deadline (up to 600 seconds, bounded by `job_timeout`). The session-wide client deadline is far too short for a reasoning model writing thousands of tokens.
+
+The worker sets an explicit `HERMES_API_CALL_STALE_TIMEOUT` (600 seconds) before it builds the agent. The trusted proxy answers non-streamed, and Hermes abandons a non-streamed call it has heard nothing from: the upstream floor for this model family is 180 seconds, while a 4k-token reasoning turn needs up to about 250 seconds before its first byte. Without the override, long tasks die as `model_failed` after the stale retry collides with the proxy's one-call-per-task lock. Setting it explicitly also prevents the run-budget calculation from halving it mid-job.
+
+A heavy task can still exceed the 20-minute job budget, because the deployed model decodes at roughly 15-20 tokens per second and a coding task spends minutes reasoning. That ends as an honest `timeout` with the artifacts collected, not as a model error. The same limit decides whether a member's long request should hand off early rather than be attempted in the conversational turn.
 
 ## Persistence and delivery
 
