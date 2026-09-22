@@ -296,6 +296,12 @@ def run_job(job: dict, *, runtime_loader=load_runtime, workspace=Path("/workspac
                 "Refer to a filename only if helpful; do not dump file contents into chat. "
                 "Only public club memory is available here; personal memory is not available."
             )
+        # The deployed reasoning model thinks for up to ~250 seconds before it emits a
+        # single byte, and the trusted proxy returns non-streamed completions, so the
+        # upstream default stale timeout (a 180s floor for this model family) abandons
+        # calls that are still working. Set explicit, so Hermes's run-budget halving
+        # cannot shrink it mid-job either. The proxy caps a call at 600s.
+        os.environ.setdefault('HERMES_API_CALL_STALE_TIMEOUT', '600')
         agent = agent_class(base_url=job.get("base_url") or os.environ.get("HERMES_BASE_URL", service_url.rstrip("/") + "/v1"),
                             api_key=token, provider="custom", api_mode="chat_completions",
                             model=job.get("model") or os.environ.get("HERMES_MODEL", "Qwen3.8-Flash-Next"),

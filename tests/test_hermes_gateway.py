@@ -7,11 +7,45 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+import aiohttp
 import pytest
 
 from peterbot.agent_policy import Principal
 from peterbot.hermes_gateway import Capability, HermesGateway
 from peterbot.hermes_settings import HermesSettings
+
+
+def sse_lines(result):
+    """Render a completion dict the way a streaming server would: deltas, then finish.
+
+    Tool arguments are deliberately split across two deltas because that is how real
+    servers send them, so the reassembly is exercised by every test using this double.
+    """
+    choice = (result.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    finish = choice.get("finish_reason") or "stop"
+    lines = []
+
+    def emit(delta):
+        lines.append("data: " + json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}))
+
+    if message.get("reasoning"):
+        emit({"reasoning": message["reasoning"]})
+    if message.get("content"):
+        emit({"content": message["content"]})
+    for index, call in enumerate(message.get("tool_calls") or []):
+        function = call.get("function") or {}
+        emit({"tool_calls": [{"index": index, "id": call.get("id", f"call-{index}"), "type": "function",
+                              "function": {"name": function.get("name", ""), "arguments": ""}}]})
+        arguments = function.get("arguments") or ""
+        if arguments:
+            middle = max(1, len(arguments) // 2)
+            emit({"tool_calls": [{"index": index, "function": {"arguments": arguments[:middle]}}]})
+            emit({"tool_calls": [{"index": index, "function": {"arguments": arguments[middle:]}}]})
+    lines.append("data: " + json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}))
+    lines.append("data: [DONE]")
+    lines.append("")
+    return [line + "\n" for line in lines]
 
 
 class UpstreamSession:
@@ -22,21 +56,34 @@ class UpstreamSession:
         self.close = AsyncMock()
         self.result = {"choices": [{"message": {"role": "assistant", "content": "result"}}]}
         self.results = None
+        self.fail_times = 0
 
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise aiohttp.ClientConnectionError("stream dropped")
         if self.results:
             result = self.results[min(len(self.calls) - 1, len(self.results) - 1)]
         else:
             result = self.result
 
-        async def chunks(size):
-            yield json.dumps(result).encode()
+        class Stream:
+            def __aiter__(self):
+                async def generate():
+                    for line in sse_lines(result):
+                        yield line.encode()
+                return generate()
+
+            async def iter_chunked(self, size):
+                # The sandbox model proxy reads a non-streamed body; keep that path working.
+                yield json.dumps(result).encode()
+
+            read = AsyncMock(return_value=json.dumps(result).encode())
 
         class Response:
             status = 200
-            content = SimpleNamespace(read=AsyncMock(return_value=json.dumps(result).encode()),
-                                      iter_chunked=chunks)
+            content = Stream()
 
             async def __aenter__(self):
                 return self

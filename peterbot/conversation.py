@@ -9,6 +9,7 @@ non-empty path), and never shows a member an internal failure.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -41,6 +42,12 @@ MIN_COMPLETION_TOKENS = 4096
 MAX_COMPLETION_TOKENS = 8192
 DEFAULT_TIMEOUT_SECONDS = 240
 RETRY_TIMEOUT_SECONDS = 120
+# One attempt may run this long in total, and a stream that sends nothing at all for
+# STREAM_IDLE_SECONDS is treated as dead. The idle rule is what makes a long reasoning
+# turn safe: at roughly 20 tokens/second a 4096-token turn needs three minutes, which
+# no sane total deadline can cover without also hiding a hung connection.
+TOTAL_ATTEMPT_SECONDS = 600
+STREAM_IDLE_SECONDS = 90
 MIN_ATTEMPT_SECONDS = 5
 MAX_RESPONSE_BYTES = 1024 * 1024
 KNOWLEDGE_EXCERPT_CHARS = 2400
@@ -103,22 +110,89 @@ def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: S
 
 def _payload(config: Any, messages: list, *, thinking: bool, temperature: float) -> dict:
     return {'model': config.inference.model, 'messages': messages, 'tools': [TOOL_HANDOFF],
-            'tool_choice': 'auto', 'parallel_tool_calls': False, 'stream': False, 'n': 1,
+            'tool_choice': 'auto', 'parallel_tool_calls': False, 'stream': True, 'n': 1,
             'max_tokens': _completion_budget(config), 'temperature': temperature,
             'chat_template_kwargs': {'enable_thinking': bool(thinking)}}
 
 
+def _merge_tool_call(slots: dict, call: dict) -> None:
+    """Tool calls arrive as deltas: the name once, the arguments in pieces."""
+    index = call.get('index', 0)
+    slot = slots.setdefault(index, {'id': None, 'type': 'function',
+                                    'function': {'name': '', 'arguments': ''}})
+    if call.get('id'):
+        slot['id'] = call['id']
+    function = call.get('function') or {}
+    name = function.get('name')
+    if name:
+        existing = slot['function']['name']
+        if not existing:
+            slot['function']['name'] = name
+        elif not existing.endswith(name) and not name.endswith(existing):
+            slot['function']['name'] = existing + name
+    arguments = function.get('arguments')
+    if arguments:
+        slot['function']['arguments'] += arguments
+
+
+async def _read_stream(response: Any) -> dict:
+    """Rebuild one non-streamed completion shape from an SSE stream.
+
+    Streaming is not about latency here. A non-streamed request returns no bytes at all
+    until generation is finished, so the only way to tell "still thinking" from "server
+    gone" is to watch the stream: tokens arriving means alive, silence means dead.
+    Returns the same shape as a non-streamed completion, so callers are unchanged.
+    """
+    content: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict] = {}
+    finish: str | None = None
+    total = 0
+    async for raw in response.content:
+        total += len(raw)
+        if total > MAX_RESPONSE_BYTES:
+            raise ValueError(MODEL_UNAVAILABLE_REPLY)
+        line = raw.strip()
+        if not line.startswith(b'data:'):
+            continue
+        data = line[5:].strip()
+        if data == b'[DONE]':
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue
+        choices = chunk.get('choices') or []
+        if not choices:
+            continue
+        choice = choices[0]
+        if choice.get('finish_reason'):
+            finish = choice['finish_reason']
+        delta = choice.get('delta') or {}
+        if delta.get('content'):
+            content.append(delta['content'])
+        thinking_text = delta.get('reasoning') or delta.get('reasoning_content')
+        if thinking_text:
+            reasoning.append(thinking_text)
+        for call in delta.get('tool_calls') or []:
+            _merge_tool_call(calls, call)
+    message: dict[str, Any] = {'role': 'assistant', 'content': ''.join(content), 'reasoning': ''.join(reasoning)}
+    if calls:
+        message['tool_calls'] = [calls[index] for index in sorted(calls)]
+    if finish is None:
+        log_with_context(logging.WARNING, 'Conversation stream ended without a finish reason',
+                         content_chars=len(message['content']), tool_calls=len(calls))
+    return {'choices': [{'message': message, 'finish_reason': finish}]}
+
+
 async def _post(session: Any, config: Any, payload: dict, timeout: float) -> dict:
+    read_timeout = aiohttp.ClientTimeout(total=min(timeout, TOTAL_ATTEMPT_SECONDS), sock_connect=10,
+                                         sock_read=STREAM_IDLE_SECONDS)
     async with session.post(_endpoint(config), json=payload, headers=_headers(config), allow_redirects=False,
-                            timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+                            timeout=read_timeout) as response:
         if response.status != 200:
             raise ValueError(MODEL_UNAVAILABLE_REPLY)
-        raw = bytearray()
-        async for chunk in response.content.iter_chunked(65536):
-            raw.extend(chunk)
-            if len(raw) > MAX_RESPONSE_BYTES:
-                raise ValueError(MODEL_UNAVAILABLE_REPLY)
-    return json.loads(raw)
+        return await _read_stream(response)
 
 
 def _decode(message: dict) -> tuple[str, str]:
@@ -155,6 +229,7 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
 
     deadline = time.monotonic() + _timeout_seconds(config)
     attempts = 0
+    stream_failed = False
     for thinking in (True, False):
         remaining = deadline - time.monotonic()
         if remaining < MIN_ATTEMPT_SECONDS:
@@ -163,13 +238,27 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
         payload = _payload(config, attempt_messages, thinking=thinking,
                            temperature=0.6 if thinking else 0.3)
         attempts += 1
-        data = await _post(session, config, payload, remaining if thinking else min(remaining, RETRY_TIMEOUT_SECONDS))
+        try:
+            data = await _post(session, config, payload,
+                               remaining if thinking else min(remaining, RETRY_TIMEOUT_SECONDS))
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # A dropped or stalled stream is not a member-facing error yet: the cheaper
+            # attempt (thinking off) often still gets an answer out.
+            stream_failed = True
+            log_with_context(logging.WARNING, 'Conversation attempt failed before an answer',
+                             thinking=thinking, error_type=type(exc).__name__,
+                             seconds=round(_timeout_seconds(config) - max(remaining, 0), 1))
+            continue
         kind, text = _decode(((data.get('choices') or [{}])[0].get('message') or {}))
         if kind == ANSWER:
             return text
         if kind == HANDOFF:
             return None
 
+    if stream_failed:
+        log_error_with_context('Conversation model did not answer on any attempt', attempts=attempts,
+                               model=str(getattr(config.inference, 'model', '')), prompt_chars=len(prompt))
+        raise ValueError(MODEL_UNAVAILABLE_REPLY)
     log_error_with_context('Conversation model returned no usable answer', attempts=attempts,
                            model=str(getattr(config.inference, 'model', '')), prompt_chars=len(prompt))
     return BLANK_ANSWER_REPLY

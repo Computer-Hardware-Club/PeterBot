@@ -456,6 +456,11 @@ class HermesGateway:
             status = result.get('status','failed')
             if status not in {'completed','failed','timeout','cancelled'}:
                 status = 'failed'
+            if status != 'completed':
+                # The worker's phase is the only vantage point on why a sandbox run died;
+                # without it a failure is indistinguishable from any other.
+                log.warning('Hermes task failed: job=%s status=%s error_code=%s', job['id'], status,
+                            result.get('error_code', 'unspecified'))
             answer = strip_think_blocks(str(result.get('answer','No final answer was returned.')))
             self.jobs.update(job['id'],status=status,answer=answer,artifacts=result.get('artifacts',[]))
         except asyncio.CancelledError:
