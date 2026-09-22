@@ -33,6 +33,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ class JobStore:
         for name, definition in {'input_files':"TEXT NOT NULL DEFAULT '[]'", 'delivery_cursor':'INTEGER NOT NULL DEFAULT 0',
                                  'delivery_mode':"TEXT NOT NULL DEFAULT 'private'", 'context':"TEXT NOT NULL DEFAULT '[]'",
                                  'delivery_status':"TEXT NOT NULL DEFAULT 'pending'", 'delivery_attempts':'INTEGER NOT NULL DEFAULT 0',
-                                 'delivery_receipts':"TEXT NOT NULL DEFAULT '[]'"}.items():
+                                 'delivery_receipts':"TEXT NOT NULL DEFAULT '[]'", 'status_message_id':'INTEGER'}.items():
             if name not in columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
         # Ingress reservations map one Discord source message to one job so a
@@ -108,7 +109,7 @@ class JobStore:
 
     def create(self, *, guild_id: int, user_id: int, channel_id: int,
                source_message_id: int, prompt: str, parent_id: str | None = None, input_files: list | None = None, ready: bool = True, delivery_mode: str = 'private', context: list | None = None,
-               ingress: tuple[int, int] | None = None) -> dict:
+               ingress: tuple[int, int] | None = None, status_message_id: int | None = None) -> dict:
         if not prompt.strip() or len(prompt) > 16000:
             raise ValueError('Please use a task description between 1 and 16,000 characters.')
         if delivery_mode not in {'private','channel'}:
@@ -121,7 +122,8 @@ class JobStore:
             self.check_capacity(user_id)
             self.db.execute('INSERT INTO jobs (id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
                             (job_id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,QUEUED if ready else PREPARING,now(),now()))
-            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=? WHERE id=?',(json.dumps(input_files or []),delivery_mode,json.dumps(context or []),job_id))
+            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=?,status_message_id=? WHERE id=?',
+                            (json.dumps(input_files or []),delivery_mode,json.dumps(context or []),status_message_id,job_id))
             if ingress is not None:
                 # Job insertion and ingress binding share one transaction: no
                 # crash window can leave a committed job whose reservation is
@@ -301,8 +303,9 @@ class JobStore:
         return dict(row) if row else None
 
     def update(self, job_id: str, *, status: str | None = None, answer: str | None = None,
-               artifacts: list | None = None, delivered: bool | None = None, delivery_cursor: int | None = None) -> None:
-        fields = {'updated_at': now()}
+               artifacts: list | None = None, delivered: bool | None = None, delivery_cursor: int | None = None,
+               status_message_id: int | None = None) -> None:
+        fields: dict[str, Any] = {'updated_at': now()}
         if status is not None:
             if status not in {'queued','running','completed','failed','cancelled','timeout','interrupted'}:
                 raise ValueError('Invalid task status')
@@ -313,6 +316,8 @@ class JobStore:
             fields['artifacts'] = json.dumps(artifacts)
         if delivery_cursor is not None:
             fields['delivery_cursor']=delivery_cursor
+        if status_message_id is not None:
+            fields['status_message_id']=status_message_id
         if delivered is not None:
             fields['delivered'] = int(delivered)
         with self.db:

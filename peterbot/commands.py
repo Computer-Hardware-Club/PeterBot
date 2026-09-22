@@ -295,7 +295,9 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             if router:
                 router.remember(message, address_reason)
             try:
-                async with asyncio.timeout(config.agent.request_timeout_seconds):
+                # Outer slack over the model deadline, so a slow round is reported by
+                # call_chat's own timeout instead of as an internal error here.
+                async with asyncio.timeout(config.agent.request_timeout_seconds + 15):
                     mention_images, image_error = await resolve_mention_images(
                         message,
                         image_limit=config.mention_image_limit,

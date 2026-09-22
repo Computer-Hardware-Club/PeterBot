@@ -17,7 +17,7 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py README.md config.json .env.example ./
+COPY bot.py README.md config.json .env.example club-knowledge.md ./
 COPY docker ./docker
 COPY peterbot ./peterbot
 

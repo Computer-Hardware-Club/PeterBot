@@ -8,12 +8,46 @@ from unittest.mock import AsyncMock, patch
 import discord
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+import aiohttp
 import pytest
 
 from peterbot.agent_jobs import JobStore
 from peterbot.agent_policy import Principal
 from peterbot.hermes_gateway import Capability, HermesGateway
 from peterbot.hermes_settings import HermesSettings
+
+
+def sse_lines(result):
+    """Render a completion dict the way a streaming server would: deltas, then finish.
+
+    Tool arguments are deliberately split across two deltas because that is how real
+    servers send them, so the reassembly is exercised by every test using this double.
+    """
+    choice = (result.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    finish = choice.get("finish_reason") or "stop"
+    lines = []
+
+    def emit(delta):
+        lines.append("data: " + json.dumps({"choices": [{"index": 0, "delta": delta, "finish_reason": None}]}))
+
+    if message.get("reasoning"):
+        emit({"reasoning": message["reasoning"]})
+    if message.get("content"):
+        emit({"content": message["content"]})
+    for index, call in enumerate(message.get("tool_calls") or []):
+        function = call.get("function") or {}
+        emit({"tool_calls": [{"index": index, "id": call.get("id", f"call-{index}"), "type": "function",
+                              "function": {"name": function.get("name", ""), "arguments": ""}}]})
+        arguments = function.get("arguments") or ""
+        if arguments:
+            middle = max(1, len(arguments) // 2)
+            emit({"tool_calls": [{"index": index, "function": {"arguments": arguments[:middle]}}]})
+            emit({"tool_calls": [{"index": index, "function": {"arguments": arguments[middle:]}}]})
+    lines.append("data: " + json.dumps({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}))
+    lines.append("data: [DONE]")
+    lines.append("")
+    return [line + "\n" for line in lines]
 
 
 class UpstreamSession:
@@ -23,18 +57,35 @@ class UpstreamSession:
         self.calls = []
         self.close = AsyncMock()
         self.result = {"choices": [{"message": {"role": "assistant", "content": "result"}}]}
+        self.results: list | None = None
+        self.fail_times = 0
 
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        result = self.result
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise aiohttp.ClientConnectionError("stream dropped")
+        if self.results:
+            result = self.results[min(len(self.calls) - 1, len(self.results) - 1)]
+        else:
+            result = self.result
 
-        async def chunks(size):
-            yield json.dumps(result).encode()
+        class Stream:
+            def __aiter__(self):
+                async def generate():
+                    for line in sse_lines(result):
+                        yield line.encode()
+                return generate()
+
+            async def iter_chunked(self, size):
+                # The sandbox model proxy reads a non-streamed body; keep that path working.
+                yield json.dumps(result).encode()
+
+            read = AsyncMock(return_value=json.dumps(result).encode())
 
         class Response:
             status = 200
-            content = SimpleNamespace(read=AsyncMock(return_value=json.dumps(result).encode()),
-                                      iter_chunked=chunks)
+            content = Stream()
 
             async def __aenter__(self):
                 return self
@@ -254,10 +305,50 @@ def test_model_proxy_fixes_upstream_model_thinking_credentials_and_flags(tmp_pat
                 "messages": messages, "temperature": 0.5, "model": "trusted-qwen",
                 "stream": False, "n": 1, "parallel_tool_calls": False,
                 "max_tokens": gateway.settings.max_tokens,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "chat_template_kwargs": {"enable_thinking": True},
             }
             assert cap.model_calls == 1
             assert cap.output_tokens == gateway.settings.max_tokens
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_model_calls_for_one_task_wait_instead_of_failing(tmp_path):
+    """A client retry that races the tail of the previous call must be serialized, not
+    rejected with a 429 that kills the task."""
+
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            capability(gateway)
+            body = {"messages": [{"role": "user", "content": "solve this"}]}
+            first, second = await asyncio.gather(
+                client.post("/v1/chat/completions", headers=headers(), json=body),
+                client.post("/v1/chat/completions", headers=headers(), json=body),
+            )
+            assert (first.status, second.status) == (200, 200)
+            # Both reached the upstream, one after the other.
+            assert len(gateway.session.calls) == 2
+            assert not gateway.capabilities["valid"].lock.locked()
+
+    asyncio.run(scenario())
+
+
+def test_a_wedged_model_lock_still_refuses_rather_than_queueing_forever(tmp_path, monkeypatch):
+    import peterbot.hermes_gateway as gateway_module
+
+    monkeypatch.setattr(gateway_module, "MODEL_LOCK_WAIT_SECONDS", 0.05)
+
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cap = capability(gateway)
+            await cap.lock.acquire()  # a call that never returns
+            try:
+                response = await client.post("/v1/chat/completions", headers=headers(),
+                                             json={"messages": [{"role": "user", "content": "hi"}]})
+                assert response.status == 429
+                assert gateway.session.calls == []
+            finally:
+                cap.lock.release()
 
     asyncio.run(scenario())
 

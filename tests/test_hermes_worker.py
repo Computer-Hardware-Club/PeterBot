@@ -1,6 +1,7 @@
 """Exercise the exact Hermes boundary without installing an optional heavy runtime."""
 import json
 import base64
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -56,7 +57,7 @@ def test_real_runtime_contract_thinking_privacy_and_cleanup(prepared):
     assert agent.kwargs["api_key"] == "secret-job-capability"
     assert agent.kwargs["base_url"] == "http://gateway:8770/v1"
     assert agent.kwargs["model"] == "actual-qwen-model"
-    assert agent.kwargs["request_overrides"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert agent.kwargs["request_overrides"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
     assert agent.kwargs["skip_context_files"] and agent.kwargs["skip_memory"] and agent.kwargs["skip_background_review"]
     assert not agent.kwargs["load_soul_identity"] and not agent.kwargs["save_trajectories"]
     assert agent._skip_mcp_refresh and agent._persist_disabled
@@ -120,6 +121,22 @@ def test_broker_memory_dispatch_does_not_invent_authority(tmp_path):
     messages = []
     agent._execute_tool_calls(SimpleNamespace(tool_calls=[call("peter_memory_update", arguments)]), messages, "task")
     assert requests == [("peter_memory_update", arguments)]
+
+
+def test_slow_reasoning_call_is_not_abandoned_as_stale(prepared, monkeypatch):
+    """The deployed model can think for minutes before emitting its first byte, and the
+    capability proxy answers non-streamed, so Hermes's stale default must be raised
+    explicitly before the agent is built."""
+    monkeypatch.delenv("HERMES_API_CALL_STALE_TIMEOUT", raising=False)
+    seen = {}
+
+    class Recorder(FakeHermes):
+        def __init__(self, **kwargs):
+            seen["stale"] = os.environ.get("HERMES_API_CALL_STALE_TIMEOUT")
+            super().__init__(**kwargs)
+
+    run_job(job(), runtime_loader=lambda: (Recorder, {}), workspace=prepared / "workspace", home=prepared / "home")
+    assert float(seen["stale"]) == 600.0
 
 
 def test_provider_failure_does_not_leak_and_resources_close(prepared, monkeypatch):

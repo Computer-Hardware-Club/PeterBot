@@ -64,7 +64,7 @@ class RealHermesLoop(unittest.TestCase):
                 self.assertIn("4", result["answer"])
                 self.assertEqual((root / "workspace/artifacts/result.txt").read_text(), "4")
                 self.assertTrue(all(not request.get("stream") for request in requests))
-                self.assertTrue(all(not request["chat_template_kwargs"]["enable_thinking"] for request in requests))
+                self.assertTrue(all(request["chat_template_kwargs"]["enable_thinking"] for request in requests))
                 self.assertEqual(result.get("diagnostics"), [
                     {"tool": "calculate", "error_type": "none", "succeeded": True},
                     {"tool": "write_file", "error_type": "none", "succeeded": True}])

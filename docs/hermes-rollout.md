@@ -1,6 +1,6 @@
 # Hermes-backed Peter
 
-Status: officer pilot deployed and healthy on p910; see deploy/HERMES.md for operating boundaries and deployment instructions. Local suite: 613 passed, 1 optional runtime test skipped. That runtime test passed separately against the real pinned Hermes image. A real Qwen smoke completed calculation, attachment reading, sandbox code/artifact creation, and memory save/recall. All 14 live sandbox isolation checks passed.
+Status: officer pilot deployed and healthy on p910; see deploy/HERMES.md for operating boundaries and deployment instructions. The merged gateway image suite on September 22 passed 713 tests with 1 optional runtime test skipped; that pinned Hermes fixture passed separately inside the worker image. Earlier real Qwen smoke completed calculation, attachment reading, sandbox code/artifact creation, and memory save/recall, with 14 live sandbox isolation checks. Those earlier smoke results still need repeating against the merged release candidate.
 
 ## Decision
 
