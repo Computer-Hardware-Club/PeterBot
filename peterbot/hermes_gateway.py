@@ -16,7 +16,7 @@ import aiohttp
 from aiohttp import web
 import discord
 
-from .agent_jobs import JobStore
+from .agent_jobs import JobStore, TERMINAL_STATUSES
 from .agent_memory import ScopedMemoryStore, MemoryConflict
 from .agent_policy import AgentPolicy, Principal, PolicyDenied
 from .hermes_settings import HermesSettings
@@ -81,8 +81,13 @@ class Capability:
 class HermesGateway:
     def __init__(self, bot, config, settings: HermesSettings):
         self.bot, self.config, self.settings = bot, config, settings
-        self.policy = AgentPolicy(settings.allowed_guild_ids, settings.officer_role_ids,
-                                  settings.owner_user_ids, settings.officer_only)
+        self.policy = AgentPolicy(
+            allowed_guild_ids=settings.allowed_guild_ids,
+            officer_role_ids=settings.officer_role_ids,
+            owner_user_ids=settings.owner_user_ids,
+            officer_only=settings.officer_only,
+            control_channel_ids=settings.control_channel_ids,
+        )
         state_dir=Path(settings.state_dir)
         state_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
         state_dir.chmod(0o700)
@@ -219,7 +224,7 @@ class HermesGateway:
                               self.settings.max_job_output_tokens - cap.output_tokens)
             payload.update(model=self.config.inference.model, stream=False, n=1,
                            parallel_tool_calls=False, max_tokens=token_limit,
-                           chat_template_kwargs={'enable_thinking':True})
+                           chat_template_kwargs={'enable_thinking':False})
             cap.model_calls += 1
             cap.output_tokens += token_limit
             base = self.config.inference.base_url.rstrip('/')
@@ -309,53 +314,103 @@ class HermesGateway:
     async def submit(self, *, guild_id: int, user_id: int, channel, source_message_id: int,
                      prompt: str, parent_id: str | None = None, attachments=(), allow_active_parent: bool = False, in_channel: bool = False, context: list | None = None) -> dict:
         await self.principal(guild_id,user_id,channel.id)
-        if time.monotonic() - self.last_submit.get(user_id,0) < 10:
-            raise ValueError('Give me a few seconds before submitting another task.')
         if not prompt.strip() or len(prompt)>16000:
             raise ValueError('Please use a task description between 1 and 16,000 characters.')
-        self.jobs.check_capacity(user_id)
-        input_files = await read_attachments(attachments)
-        self.last_submit[user_id] = time.monotonic()
-        if in_channel:
+        # A replayed Discord event for the same source message must not spawn a
+        # second task or thread. The duplicate lookup precedes the cooldown so
+        # a genuine replay returns the original job instead of a rate-limit no.
+        reserved = self.jobs.claim_ingress(guild_id, source_message_id)
+        if reserved is not None:
+            existing = self.jobs.get(reserved) if reserved else None
+            if existing:
+                return existing
+            raise ValueError('That message is already being submitted. Wait a moment.')
+        job = None
+        created_thread = None
+        acknowledgement = None
+
+        async def fail_acknowledgement() -> None:
+            if acknowledgement is not None and hasattr(acknowledgement, 'edit'):
+                try:
+                    await acknowledgement.edit(content='I could not start this task. Use `/task` to try again.',
+                                               allowed_mentions=discord.AllowedMentions.none())
+                except discord.HTTPException:
+                    pass
+
+        try:
+            if time.monotonic() - self.last_submit.get(user_id,0) < 10:
+                raise ValueError('Give me a few seconds before submitting another task.')
+            self.jobs.check_capacity(user_id)
+            input_files = await read_attachments(attachments)
+            self.last_submit[user_id] = time.monotonic()
+            if in_channel:
+                if parent_id:
+                    raise PolicyDenied('Private task context cannot move into a shared channel')
+                job = self.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel.id,
+                    source_message_id=source_message_id,prompt=prompt,input_files=input_files,
+                    delivery_mode='channel',context=context,ingress=(guild_id,source_message_id))
+                return job
             if parent_id:
-                raise PolicyDenied('Private task context cannot move into a shared channel')
-            return self.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel.id,
-                source_message_id=source_message_id,prompt=prompt,input_files=input_files,
-                delivery_mode='channel',context=context)
-        if parent_id:
-            old = self.jobs.owned(parent_id,guild_id,user_id)
-            if old.get('delivery_mode','private')=='channel':
-                raise PolicyDenied('Reply to Peter in the original channel instead.')
-            if not allow_active_parent and old['status'] in {'queued','running'}:
-                raise ValueError('That task is still active. Cancel it before changing its objective.')
-            channel = await self.bot.fetch_channel(old['channel_id'])
-            await self.principal(guild_id,user_id,channel.id)
-            if not input_files:
-                input_files=json.loads(old.get('input_files','[]'))
-        else:
+                old = self.jobs.owned(parent_id,guild_id,user_id)
+                if old.get('delivery_mode','private')=='channel':
+                    raise PolicyDenied('Reply to Peter in the original channel instead.')
+                if not allow_active_parent and old['status'] in {'queued','running'}:
+                    raise ValueError('That task is still active. Cancel it before changing its objective.')
+                channel = await self.bot.fetch_channel(old['channel_id'])
+                await self.principal(guild_id,user_id,channel.id)
+                if not input_files:
+                    input_files=json.loads(old.get('input_files','[]'))
+                job = self.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel.id,
+                    source_message_id=source_message_id,prompt=prompt,parent_id=parent_id,input_files=input_files,
+                    ingress=(guild_id,source_message_id))
+                return job
             if not isinstance(channel, discord.TextChannel):
                 raise ValueError('Start a new task from a server text channel using /task.')
             member = await channel.guild.fetch_member(user_id)
             channel = await channel.create_thread(name='Peter task '+secrets.token_hex(3),
                                                    type=discord.ChannelType.private_thread,
                                                    invitable=False,auto_archive_duration=1440)
+            created_thread = channel
             try:
                 await channel.add_user(member)
             except discord.HTTPException:
                 await channel.edit(archived=True)
                 raise
-        job = None
-        try:
             job = self.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel.id,
-                source_message_id=source_message_id,prompt=prompt,parent_id=parent_id,input_files=input_files,ready=False)
-            await channel.send(f"Queued task `{job['id']}`. I’ll post the result and files here. You can send follow-up messages in this thread; use `/tasks` for status or `/cancel_task` to stop it.",
-                               allowed_mentions=discord.AllowedMentions.none())
-            self.jobs.update(job['id'],status='queued')
+                source_message_id=source_message_id,prompt=prompt,parent_id=parent_id,input_files=input_files,
+                ready=False,ingress=(guild_id,source_message_id))
+            # The job stays `preparing` while the acknowledgement send is in
+            # flight: the queue must not see it until the thread promise has
+            # actually reached the user, and `preparing` is neither claimable
+            # nor deliverable.
+            acknowledgement = await channel.send(
+                f"Queued task `{job['id']}`. I’ll post the result and files here. Use `/continue_task` for a follow-up, `/tasks` for status, or `/cancel_task` to stop it.",
+                allowed_mentions=discord.AllowedMentions.none())
+            if not self.jobs.transition(job['id'],to='queued'):
+                raise RuntimeError('Task admission was interrupted before execution.')
             return self.jobs.get(job['id'])
+        except asyncio.CancelledError:
+            # Cancellation (e.g. shutdown) while the acknowledgement send was
+            # open. Resolve the job honestly and archive the thread we created
+            # before propagating the cancellation.
+            if job:
+                self.jobs.abandon_submission(job['id'],'Task submission was interrupted before execution.')
+            else:
+                self.jobs.release_ingress(guild_id,source_message_id)
+            await fail_acknowledgement()
+            if created_thread is not None:
+                try:
+                    await channel.edit(archived=True)
+                except (discord.HTTPException, asyncio.CancelledError):
+                    pass
+            raise
         except Exception:
             if job:
-                self.jobs.update(job['id'],status='failed',answer='Task submission failed before execution.',delivered=True)
-            if not parent_id:
+                self.jobs.abandon_submission(job['id'],'Task submission failed before execution.')
+            else:
+                self.jobs.release_ingress(guild_id,source_message_id)
+            await fail_acknowledgement()
+            if created_thread is not None:
                 try:
                     await channel.edit(archived=True)
                 except discord.HTTPException:
@@ -366,7 +421,10 @@ class HermesGateway:
         job = self.jobs.owned(job_id,guild_id,user_id)
         if job['status'] not in {'queued','running'}:
             raise ValueError('That task is no longer running.')
-        self.jobs.update(job_id,status='cancelled',answer='Task cancelled.')
+        # Conditional so a completion landing in this window cannot be
+        # overwritten, and two cancellers cannot both proceed.
+        if not self.jobs.transition(job_id,to='cancelled',answer='Task cancelled.'):
+            raise ValueError('That task is no longer running.')
         for token,cap in list(self.capabilities.items()):
             if cap.job['id'] == job_id:
                 del self.capabilities[token]
@@ -382,19 +440,28 @@ class HermesGateway:
         except (aiohttp.ClientError,asyncio.TimeoutError):
             log.warning('Task revoked; sandbox cancellation delivery failed for job=%s',job_id)
 
+    async def queue_tick(self) -> None:
+        for job in self.jobs.pending():
+            if len(self.active)>=1:
+                break
+            # Atomic claim: a snapshot from `pending()` may already have been
+            # started by a previous tick or a restart.
+            if not self.jobs.claim(job['id']):
+                continue
+            fresh = self.jobs.get(job['id'])
+            if fresh is None:
+                continue
+            task = asyncio.create_task(self.run_job(fresh))
+            self.active[job['id']] = task
+            task.add_done_callback(lambda t, key=job['id']: self.active.pop(key,None))
+        for job in self.jobs.undelivered():
+            await self.deliver(job)
+
     async def queue_loop(self):
         while True:
             try:
                 await self.bot.wait_until_ready()
-                for job in self.jobs.pending():
-                    if len(self.active)>=1:
-                        break
-                    self.jobs.update(job['id'],status='running')
-                    task = asyncio.create_task(self.run_job(job))
-                    self.active[job['id']] = task
-                    task.add_done_callback(lambda t, key=job['id']: self.active.pop(key,None))
-                for job in self.jobs.undelivered():
-                    await self.deliver(job)
+                await self.queue_tick()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -432,18 +499,24 @@ class HermesGateway:
                 if response.status != 200 or len(data)>13*1024*1024:
                     raise RuntimeError('Sandbox supervisor failed')
                 result = json.loads(data)
-            if self.jobs.get(job['id'])['status'] == 'cancelled':
-                return
             status = result.get('status','failed')
             if status not in {'completed','failed','timeout','cancelled'}:
                 status = 'failed'
             answer = strip_think_blocks(str(result.get('answer','No final answer was returned.')))
-            self.jobs.update(job['id'],status=status,answer=answer,artifacts=result.get('artifacts',[]))
+            # Conditional on the job still running: a cancellation that landed
+            # while the runner was working stays terminal.
+            if not self.jobs.transition(job['id'],to=status,answer=answer,artifacts=result.get('artifacts',[])):
+                log.info('Ignoring late task result after terminal state: job=%s runner_status=%s',job['id'],status)
         except asyncio.CancelledError:
+            # Shutdown or user cancellation. A user cancellation is already
+            # terminal, so this only records interruption for live executions.
+            self.jobs.transition(job['id'],to='interrupted',
+                answer='The gateway restarted during this task. Use /continue_task to resume from the saved objective.')
             raise
         except Exception:
             log.exception('Hermes task failed: %s',job['id'])
-            self.jobs.update(job['id'],status='failed',answer='I couldn’t finish that. Try me again in a moment.')
+            if not self.jobs.transition(job['id'],to='failed',answer='I couldn’t finish that. Try me again in a moment.'):
+                log.info('Task failure ignored after terminal state: job=%s',job['id'])
         finally:
             self.capabilities.pop(token,None)
             # Closing an HTTP request alone does not guarantee worker termination.
@@ -455,38 +528,90 @@ class HermesGateway:
                 log.warning('Runner cleanup request failed: %s',job['id'])
 
     async def deliver(self, job):
+        # Delivery requires an explicit terminal execution state; never send an
+        # answer that was only inferred to be final by a negative list.
+        if job['status'] not in TERMINAL_STATUSES:
+            return
+        fresh = self.jobs.get(job['id'])
+        if fresh is None:
+            return
         try:
-            await self.principal(job['guild_id'],job['user_id'],job['channel_id'])
-            channel = await self.bot.fetch_channel(job['channel_id'])
-            text = attachment_answer(job['answer'],job['artifacts'])
-            conversational=job.get('delivery_mode','private')=='channel'
+            text = attachment_answer(fresh['answer'],fresh['artifacts'])
+            conversational=fresh.get('delivery_mode','private')=='channel'
             from .context import split_for_discord
             parts = [('text',chunk) for chunk in split_for_discord(text,1800)]
             try:
-                for artifact in json.loads(job['artifacts'])[:3]:
+                for artifact in json.loads(fresh['artifacts'])[:3]:
                     data = base64.b64decode(artifact['data_base64'],validate=True)
                     if len(data)<=8*1024*1024:
                         parts.append(('file',(Path(artifact['name']).name,data)))
             except (ValueError,KeyError,TypeError):
                 parts.append(('text','An invalid artifact was withheld.'))
+            cursor = fresh['delivery_cursor']
+            try:
+                receipts = json.loads(fresh.get('delivery_receipts','[]'))
+            except ValueError:
+                receipts = []
+        except Exception:
+            # Preparation failed before any send was attempted; the job stays
+            # pending and retryable.
+            log.exception('Task delivery preparation failed: %s',job['id'])
+            return
+        if not self.jobs.begin_delivery(job['id']):
+            return
+        try:
+            await self.principal(fresh['guild_id'],fresh['user_id'],fresh['channel_id'])
+            channel = await self.bot.fetch_channel(fresh['channel_id'])
+            first_pending = cursor
             for index,(kind,part) in enumerate(parts):
-                if index < job.get('delivery_cursor',0):
+                if index < cursor:
                     continue
+                if index > first_pending:
+                    # Re-check access between chunks; authority can change in
+                    # the middle of a multi-message answer.
+                    await self.principal(fresh['guild_id'],fresh['user_id'],fresh['channel_id'])
                 if kind == 'text':
                     kwargs={}
                     if conversational and index==0:
-                        kwargs['reference']=discord.MessageReference(message_id=job['source_message_id'],channel_id=job['channel_id'],guild_id=job['guild_id'],fail_if_not_exists=False)
-                    await channel.send(part,allowed_mentions=discord.AllowedMentions.none(),suppress_embeds=True,**kwargs)
+                        kwargs['reference']=discord.MessageReference(message_id=fresh['source_message_id'],channel_id=fresh['channel_id'],guild_id=fresh['guild_id'],fail_if_not_exists=False)
+                    sent = await channel.send(part,allowed_mentions=discord.AllowedMentions.none(),suppress_embeds=True,**kwargs)
                 else:
-                    await channel.send(file=discord.File(io.BytesIO(part[1]),filename=part[0]),allowed_mentions=discord.AllowedMentions.none())
-                self.jobs.update(job['id'],delivery_cursor=index+1)
-            self.jobs.update(job['id'],delivered=True)
+                    sent = await channel.send(file=discord.File(io.BytesIO(part[1]),filename=part[0]),allowed_mentions=discord.AllowedMentions.none())
+                sent_id = getattr(sent,'id',None)
+                if isinstance(sent_id,(int,str)):
+                    receipts.append(str(sent_id))
+                if not self.jobs.advance_delivery(job['id'],cursor=index+1,receipts=receipts):
+                    log.warning('Stale delivery receipt ignored: job=%s part=%s',job['id'],index)
+            self.jobs.complete_delivery(job['id'])
         except PolicyDenied:
             # Keep private results stored, but never deliver after authorization is lost.
-            self.jobs.update(job['id'],delivered=True)
+            self.jobs.withhold_delivery(job['id'])
             log.warning('Task result withheld after authority change: %s',job['id'])
-        except discord.HTTPException:
-            log.warning('Discord task delivery deferred: %s',job['id'])
+        except discord.Forbidden:
+            # Discord explicitly rejected the send; nothing landed.
+            self.jobs.withhold_delivery(job['id'])
+            log.warning('Task result withheld after Discord access loss: %s',job['id'])
+        except discord.HTTPException as error:
+            # A known client rejection or rate limit did not accept the send.
+            # A server error can happen after Discord created the message, so
+            # it needs the same reconciliation as a lost response.
+            status = getattr(error, 'status', None)
+            if type(status) is int and 400 <= status < 500:
+                state = self.jobs.note_delivery_failure(job['id'])
+                if state == 'exhausted':
+                    log.error('Task delivery retries exhausted; result retained for operator review: %s',job['id'])
+                else:
+                    log.warning('Discord task delivery deferred: %s',job['id'])
+            else:
+                self.jobs.mark_delivery_unknown(job['id'])
+                log.warning('Discord send outcome unknown; reconcile before resending: %s',job['id'])
+        except Exception:
+            # No explicit Discord rejection: it is unknown whether a chunk
+            # landed. Freeze for reconciliation instead of resending a chunk
+            # Discord may already have accepted. Exactly-once delivery is not
+            # promised across this state.
+            self.jobs.mark_delivery_unknown(job['id'])
+            log.exception('Task delivery outcome unknown; reconcile before resending: %s',job['id'])
 
     async def close(self):
         if self.loop_task:
@@ -494,8 +619,10 @@ class HermesGateway:
         for task in self.active.values():
             task.cancel()
         await asyncio.gather(*(list(self.active.values())+([self.loop_task] if self.loop_task else [])),return_exceptions=True)
+        self.capabilities.clear()
         if self.server:
             await self.server.cleanup()
         if self.session:
             await self.session.close()
         await self.tools.close()
+        self.jobs.close()

@@ -31,8 +31,8 @@ def interaction(*, guild_id=10, user_id=1, channel_id=20):
     )
 
 
-def http_error():
-    return discord.HTTPException(SimpleNamespace(status=500, reason="failure"), "Discord unavailable")
+def http_error(status=500):
+    return discord.HTTPException(SimpleNamespace(status=status, reason="failure"), "Discord unavailable")
 
 
 def test_task_defers_privately_before_network_and_binds_interaction_identity():
@@ -233,7 +233,7 @@ def test_delivery_retry_does_not_repeat_successfully_sent_chunks(tmp_path):
                 nonlocal calls
                 calls += 1
                 if calls == 2:
-                    raise http_error()
+                    raise http_error(status=429)
                 sent.append(text)
                 return SimpleNamespace(id=100 + calls)
 

@@ -254,7 +254,7 @@ def test_fast_model_answers_or_hands_off_without_exposing_reasoning(tmp_path, ha
             url, request = gateway.session.calls[0]
             assert url == "http://model/v1/chat/completions"
             assert request["allow_redirects"] is False
-            assert request["json"]["chat_template_kwargs"]["enable_thinking"] is True
+            assert request["json"]["chat_template_kwargs"]["enable_thinking"] is False
             assert [tool["function"]["name"] for tool in request["json"]["tools"]] == ["use_tools"]
             assert gateway.jobs.pending() == []
     asyncio.run(scenario())

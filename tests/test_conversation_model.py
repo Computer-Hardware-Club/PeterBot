@@ -17,11 +17,11 @@ def run(response, context=None):
     return result,session.calls[0]
 
 
-def test_banter_returns_text_without_sandbox_and_preserves_thinking():
+def test_banter_returns_text_without_sandbox_and_skips_reasoning():
     result,(url,args)=run({'content':'Only on Tuesdays.'},[{'created_at':datetime.now(timezone.utc),'content':'toaster?'}])
     assert result=='Only on Tuesdays.'
     assert url=='http://model/v1/chat/completions'
-    assert args['json']['chat_template_kwargs']['enable_thinking'] is True
+    assert args['json']['chat_template_kwargs']['enable_thinking'] is False
     assert args['json']['max_tokens']==2048
     assert args['json']['tools'][0]['function']['name']=='use_tools'
     assert args['headers']['Authorization']=='Bearer private-key'

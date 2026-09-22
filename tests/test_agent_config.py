@@ -34,7 +34,7 @@ def test_production_configuration_keeps_tools_inside_club(tmp_path, monkeypatch)
     assert config.agent.allowed_guild_ids == (123,)
     assert not config.agent.allow_dms
     assert config.agent.max_concurrent == 1
-    assert config.inference.model == "Qwen3.8-27B"
+    assert config.inference.model == "Qwen3.8-Flash-Next"
 
 
 def test_legacy_configuration_does_not_enable_tools(tmp_path, monkeypatch):

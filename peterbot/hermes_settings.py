@@ -18,6 +18,9 @@ class HermesSettings:
     runner_token: str
     state_dir: str
     officer_only: bool = True
+    listen_channel_ids: frozenset[int] = frozenset()
+    control_channel_ids: frozenset[int] = frozenset()
+    conversation_lease_seconds: int = 120
     max_iterations: int = 30
     max_tokens: int = 8192
     max_model_calls: int = 40
@@ -60,10 +63,20 @@ class HermesSettings:
             raise ValueError('state_dir must be an absolute path')
         if officer_only and not ids['officer_role_ids']:
             raise ValueError('Officer pilot requires officer_role_ids')
+        channel_ids = {}
+        for key in ('listen_channel_ids', 'control_channel_ids'):
+            values = raw.get(key, [])
+            if not isinstance(values, list) or any(type(v) is not int or not 0 < v < 2**63 for v in values):
+                raise ValueError(f'{key} must contain positive integer IDs')
+            channel_ids[key] = frozenset(values)
+        lease_seconds = raw.get('conversation_lease_seconds', 120)
+        if type(lease_seconds) is not int or not 30 <= lease_seconds <= 600:
+            raise ValueError('Invalid conversation_lease_seconds')
         limits = {}
         for key, minimum, maximum in (('max_iterations',1,60),('max_tokens',1024,16384),('max_model_calls',1,80),('max_job_output_tokens',8192,262144),('max_tool_calls',1,200),('job_timeout',60,1800)):
             value = raw.get(key, cls.__dataclass_fields__[key].default)
             if type(value) is not int or not minimum <= value <= maximum:
                 raise ValueError(f'Invalid {key}')
             limits[key] = value
-        return cls(**ids, **urls, runner_token=token, state_dir=state_dir,officer_only=officer_only,**limits)
+        return cls(**ids, **urls, runner_token=token, state_dir=state_dir,officer_only=officer_only,
+                   **channel_ids, conversation_lease_seconds=lease_seconds, **limits)

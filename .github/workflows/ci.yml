@@ -1,0 +1,65 @@
+name: PeterBot CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install application and test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Validate JSON configuration
+        run: python -m json.tool config.json > /dev/null && python -m json.tool deploy/hermes.example.json > /dev/null
+      - name: Compile Python modules
+        run: python -m compileall -q peterbot deploy tests
+      - name: Run deterministic tests
+        run: python -m pytest -q
+
+  images:
+    needs: unit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build gateway image
+        env:
+          REVISION: ${{ github.sha }}
+        run: docker build --target bot --build-arg "PETERBOT_REVISION=$REVISION" -t peterbot-ci-gateway .
+      - name: Build runner image
+        env:
+          REVISION: ${{ github.sha }}
+        run: docker build -f docker/Dockerfile.hermes-runner --build-arg "PETERBOT_REVISION=$REVISION" -t peterbot-ci-runner .
+      - name: Build pinned Hermes worker image
+        env:
+          REVISION: ${{ github.sha }}
+        run: docker build -f docker/Dockerfile.hermes-worker --build-arg "PETERBOT_REVISION=$REVISION" -t peterbot-ci-worker .
+      - name: Run actual Hermes adapter fixture in worker image
+        run: |
+          docker run --rm --network none --entrypoint python peterbot-ci-worker \
+            -I -c 'import importlib.util; assert importlib.util.find_spec("run_agent"), "Pinned Hermes runtime is missing"'
+          docker run --rm --network none \
+            --mount "type=bind,source=$PWD/tests/test_hermes_runtime_integration.py,target=/tmp/test_hermes_runtime_integration.py,readonly" \
+            --entrypoint python peterbot-ci-worker -I /tmp/test_hermes_runtime_integration.py -v
+      - name: Check worker isolation contract
+        run: |
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+            --tmpfs /workspace:rw,nosuid,nodev,size=64m,uid=10000,gid=10000 \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --entrypoint python peterbot-ci-worker -I -c \
+            'import os, pathlib, socket; assert os.getuid() == 10000; assert not pathlib.Path("/var/run/docker.sock").exists(); assert not os.getenv("DISCORD_TOKEN"); pathlib.Path("/workspace/check.txt").write_text("ok"); s=socket.socket(); assert s.connect_ex(("1.1.1.1",443)) != 0'

@@ -298,10 +298,10 @@ def run_job(job: dict, *, runtime_loader=load_runtime, workspace=Path("/workspac
             )
         agent = agent_class(base_url=job.get("base_url") or os.environ.get("HERMES_BASE_URL", service_url.rstrip("/") + "/v1"),
                             api_key=token, provider="custom", api_mode="chat_completions",
-                            model=job.get("model") or os.environ.get("HERMES_MODEL", "Qwen3.8-27B"),
+                            model=job.get("model") or os.environ.get("HERMES_MODEL", "Qwen3.8-Flash-Next"),
                             max_iterations=max(1, min(60, int(job.get("max_iterations", 30)))),
                             max_tokens=max(1024, min(16384, int(job.get("max_tokens", 8192)))),
-                            request_overrides={"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+                            request_overrides={"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
                             enabled_toolsets=[], disabled_toolsets=["memory", "skills", "session_search", "delegate"],
                             quiet_mode=True, save_trajectories=False, verbose_logging=False,
                             skip_context_files=True, load_soul_identity=False, skip_memory=True,

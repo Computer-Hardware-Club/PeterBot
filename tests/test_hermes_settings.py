@@ -32,8 +32,25 @@ def test_valid_settings_defaults_and_normalization(load):
     assert settings.tool_service_url == "http://gateway:8091"
     assert settings.officer_only is True
     assert settings.max_tokens == 8192
+    assert settings.listen_channel_ids == frozenset()
+    assert settings.control_channel_ids == frozenset()
+    assert settings.conversation_lease_seconds == 120
     with pytest.raises(FrozenInstanceError):
         settings.officer_only = False
+
+
+def test_listening_requires_explicit_valid_channel_ids(load):
+    assert load({"listen_channel_ids": [20], "conversation_lease_seconds": 90}).listen_channel_ids == frozenset({20})
+    for channels in (None, "all", [True], [0], ["20"]):
+        with pytest.raises(ValueError, match="listen_channel_ids"):
+            load({"listen_channel_ids": channels})
+    for duration in (None, True, 29, 601):
+        with pytest.raises(ValueError, match="conversation_lease_seconds"):
+            load({"conversation_lease_seconds": duration})
+    assert load({"control_channel_ids": [21]}).control_channel_ids == frozenset({21})
+    for channels in (None, "all", [True], [0], ["21"]):
+        with pytest.raises(ValueError, match="control_channel_ids"):
+            load({"control_channel_ids": channels})
 
 
 @pytest.mark.parametrize("key", ["allowed_guild_ids", "officer_role_ids", "owner_user_ids"])

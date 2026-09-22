@@ -56,7 +56,7 @@ def test_real_runtime_contract_thinking_privacy_and_cleanup(prepared):
     assert agent.kwargs["api_key"] == "secret-job-capability"
     assert agent.kwargs["base_url"] == "http://gateway:8770/v1"
     assert agent.kwargs["model"] == "actual-qwen-model"
-    assert agent.kwargs["request_overrides"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+    assert agent.kwargs["request_overrides"]["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
     assert agent.kwargs["skip_context_files"] and agent.kwargs["skip_memory"] and agent.kwargs["skip_background_review"]
     assert not agent.kwargs["load_soul_identity"] and not agent.kwargs["save_trajectories"]
     assert agent._skip_mcp_refresh and agent._persist_disabled

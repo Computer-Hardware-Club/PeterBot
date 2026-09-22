@@ -71,7 +71,13 @@ def validate_config(config: AppConfig) -> bool:
 
 
 def register_signal_handlers(runtime: PeterBotRuntime) -> None:
+    shutdown_scheduled = False
+
     def signal_handler(signum: int, frame: Any) -> None:
+        nonlocal shutdown_scheduled
+        if shutdown_scheduled:
+            return
+        shutdown_scheduled = True
         log_with_context(
             logging.INFO,
             "Received shutdown signal; shutting down gracefully",
@@ -79,7 +85,13 @@ def register_signal_handlers(runtime: PeterBotRuntime) -> None:
         )
         runtime.reminder_manager.save_shutdown_time()
         runtime.reminder_manager.save_reminders()
-        sys.exit(0)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            raise SystemExit(0) from None
+        # Let discord.py leave its run loop through Bot.close(). The wrapper
+        # installed below drains the Hermes gateway before closing Discord.
+        loop.create_task(runtime.bot.close())
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -110,9 +122,15 @@ def run_bot() -> None:
         runtime.hermes = HermesGateway(bot, config, HermesSettings.load(os.environ["PETERBOT_HERMES_CONFIG"]))
         register_agent_commands(bot, runtime.hermes)
         original_close = bot.close
+        agent_close_lock = asyncio.Lock()
+        agent_closed = False
         async def close_with_agent():
-            await runtime.hermes.close()
-            await original_close()
+            nonlocal agent_closed
+            async with agent_close_lock:
+                if not agent_closed:
+                    await runtime.hermes.close()
+                    agent_closed = True
+                await original_close()
         bot.close = close_with_agent
     register_handlers(bot, runtime)
     register_signal_handlers(runtime)

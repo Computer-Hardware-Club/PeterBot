@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from peterbot.agent_policy import AgentPolicy, PolicyDenied, Principal
+from peterbot.agent_policy import AgentPolicy, ControlIntent, PolicyDenied, Principal
 
 
 def policy(**kwargs):
@@ -65,3 +65,27 @@ def test_policy_and_principal_do_not_accept_mutable_collections():
         AgentPolicy(allowed_guild_ids={10})
     with pytest.raises(ValueError):
         Principal(10, 1, 20, [100])
+
+
+def test_control_requires_current_officer_private_configured_source():
+    configured = policy(control_channel_ids=frozenset({20}), owner_user_ids=frozenset({1}))
+    intent = ControlIntent(10, 1, 20, 500, "roster")
+    configured.require_control(Principal(10, 1, 20, (100,)), intent, channel_is_private=True)
+    for principal, request, private in (
+        (Principal(10, 1, 20), intent, True),
+        (Principal(10, 2, 20, (100,)), intent, True),
+        (Principal(10, 1, 21, (100,)), intent, True),
+        (Principal(10, 1, 20, (100,)), intent, False),
+        (Principal(11, 1, 20, (100,)), intent, True),
+    ):
+        with pytest.raises(PolicyDenied):
+            configured.require_control(principal, request, channel_is_private=private)
+    with pytest.raises(PolicyDenied):
+        policy().require_control(Principal(10, 1, 20, (100,)), intent, channel_is_private=True)
+
+
+def test_control_intent_rejects_forged_or_unknown_actions():
+    with pytest.raises(ValueError):
+        ControlIntent(10, 1, 20, 500, "change_policy")
+    with pytest.raises(ValueError):
+        ControlIntent(10, 1, 20, 0, "style")

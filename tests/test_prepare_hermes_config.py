@@ -13,7 +13,7 @@ def test_prepared_config_validates_and_removes_static_roster(tmp_path, monkeypat
     output=tmp_path/'config.json'
     prepare(source,output,persona)
     settings=AppConfig.load(str(output))
-    assert settings.inference.extra_request_body['chat_template_kwargs']['enable_thinking'] is True
+    assert settings.inference.extra_request_body['chat_template_kwargs']['enable_thinking'] is False
     assert settings.agent.request_timeout_seconds==120
     assert settings.agent.max_total_tokens==8192
     assert 'President:** Oliver' not in settings.peter_system_prompt

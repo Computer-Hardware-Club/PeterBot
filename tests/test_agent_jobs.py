@@ -1,8 +1,10 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
-from peterbot.agent_jobs import JobStore
+from peterbot.agent_jobs import DELIVERY_ATTEMPT_LIMIT, JobStore
 
 
 @pytest.fixture
@@ -121,3 +123,276 @@ def test_owned_history_returns_only_latest_ten(store):
         store.update(job["id"], status="completed")
     history = store.list_owned(10, 1)
     assert [j["id"] for j in history] == list(reversed(ids))[:10]
+
+
+def test_preparing_job_is_never_executable_or_deliverable(store):
+    # Regression for the submission race: a job persisted as `preparing`
+    # while its acknowledgement send is in flight used to be picked up by the
+    # negative-list `undelivered()` predicate and marked delivered while empty.
+    job = create(store, ready=False)
+    assert store.pending() == []
+    assert store.undelivered() == []
+    assert store.claim(job["id"]) is False
+    store.update(job["id"], status="queued")
+    assert [j["id"] for j in store.pending()] == [job["id"]]
+
+
+def test_claim_is_atomic_and_only_promotes_queued(store):
+    job = create(store)
+    assert store.claim(job["id"]) is True
+    assert store.claim(job["id"]) is False
+    assert store.get(job["id"])["status"] == "running"
+    cancelled = create(store, user_id=2)
+    store.update(cancelled["id"], status="cancelled")
+    assert store.claim(cancelled["id"]) is False
+
+
+def test_concurrent_claims_across_connections_admit_exactly_one(tmp_path):
+    path = str(tmp_path / "jobs.sqlite")
+    first = JobStore(path)
+    job = create(first)
+    second = JobStore(path)
+    try:
+        assert [second.claim(job["id"]), first.claim(job["id"])] == [True, False]
+        assert first.get(job["id"])["status"] == "running"
+    finally:
+        second.close()
+
+
+def test_completion_cannot_overwrite_a_terminal_cancellation(store):
+    job = create(store)
+    store.update(job["id"], status="running")
+    assert store.transition(job["id"], to="cancelled", answer="Task cancelled.") is True
+    assert store.transition(job["id"], to="completed", answer="late", artifacts=[{"name": "a.md"}]) is False
+    after = store.get(job["id"])
+    assert after["status"] == "cancelled"
+    assert after["answer"] == "Task cancelled."
+    assert json.loads(after["artifacts"]) == []
+
+
+def test_transitions_enforce_the_legal_state_machine(store):
+    job = create(store)
+    with pytest.raises(ValueError, match="status"):
+        store.transition(job["id"], to="invented")
+    assert store.transition(job["id"], to="completed", answer="x") is False
+    assert store.transition(job["id"], to="running") is True
+    assert store.transition(job["id"], to="interrupted") is True
+    assert store.transition(job["id"], to="running") is False
+    assert store.get(job["id"])["status"] == "interrupted"
+
+
+def test_ingress_reservations_deduplicate_discord_replays(tmp_path):
+    path = str(tmp_path / "jobs.sqlite")
+    store = JobStore(path)
+    try:
+        assert store.claim_ingress(10, 30) is None
+        assert store.claim_ingress(10, 30) == ""
+        job = store.create(guild_id=10, user_id=1, channel_id=20, source_message_id=30,
+                           prompt="Research hardware options", ingress=(10, 30))
+        assert store.claim_ingress(10, 30) == job["id"]
+        assert store.find_by_ingress(10, 30)["id"] == job["id"]
+        store.release_ingress(10, 30)
+        assert store.claim_ingress(10, 30) == job["id"]
+        assert store.claim_ingress(10, 31) is None
+        store.release_ingress(10, 31)
+        assert store.claim_ingress(10, 31) is None
+    finally:
+        store.close()
+
+
+def test_restart_releases_unbound_ingress_reservations(tmp_path):
+    path = str(tmp_path / "jobs.sqlite")
+    first = JobStore(path)
+    assert first.claim_ingress(10, 30) is None
+    first.close()
+    restarted = JobStore(path)
+    try:
+        assert restarted.claim_ingress(10, 30) is None
+    finally:
+        restarted.close()
+
+
+def test_job_and_ingress_binding_commit_atomically(tmp_path):
+    # A crash directly after the job insert must not leave the reservation
+    # unbound: restart deletes unbound reservations, and a replayed Discord
+    # event would then create a second job and thread.
+    path = str(tmp_path / "jobs.sqlite")
+    first = JobStore(path)
+    assert first.claim_ingress(10, 30) is None
+    job = first.create(guild_id=10, user_id=1, channel_id=20, source_message_id=30,
+                       prompt="Research hardware options", ingress=(10, 30))
+    first.close()  # simulated crash immediately after the committed insert
+    restarted = JobStore(path)
+    try:
+        assert restarted.claim_ingress(10, 30) == job["id"]
+        assert restarted.find_by_ingress(10, 30)["id"] == job["id"]
+    finally:
+        restarted.close()
+
+
+def test_ingress_binding_without_prior_reservation(tmp_path):
+    store = JobStore(str(tmp_path / "jobs.sqlite"))
+    try:
+        job = store.create(guild_id=10, user_id=1, channel_id=20, source_message_id=30,
+                           prompt="Research hardware options", ingress=(10, 30))
+        assert store.claim_ingress(10, 30) == job["id"]
+    finally:
+        store.close()
+
+
+def test_restart_fails_unfinished_submission_but_keeps_queued(tmp_path):
+    path = str(tmp_path / "jobs.sqlite")
+    first = JobStore(path)
+    preparing = create(first, ready=False)
+    queued = create(first, user_id=2)
+    first.close()
+    restarted = JobStore(path)
+    try:
+        failed = restarted.get(preparing["id"])
+        assert failed["status"] == "failed"
+        assert "interrupted" in failed["answer"]
+        assert restarted.get(queued["id"])["status"] == "queued"
+        assert [j["id"] for j in restarted.undelivered()] == [preparing["id"]]
+    finally:
+        restarted.close()
+
+
+def test_capacity_reserves_slots_for_preparing_jobs(store):
+    create(store, ready=False)
+    create(store, ready=False)
+    with pytest.raises(ValueError, match="queue is full"):
+        create(store)
+
+
+def test_capacity_is_atomic_across_gateway_connections(tmp_path):
+    path = str(tmp_path / "jobs.sqlite")
+    seed = JobStore(path)
+    seed.close()
+    ready = Barrier(3)
+
+    def submit(index):
+        connection = JobStore(path)
+        try:
+            ready.wait(timeout=5)
+            try:
+                connection.create(guild_id=10, user_id=1, channel_id=20,
+                                  source_message_id=100 + index, prompt="work")
+                return "accepted"
+            except ValueError:
+                return "full"
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        outcomes = list(pool.map(submit, range(3)))
+    assert sorted(outcomes) == ["accepted", "accepted", "full"]
+
+
+def test_delivery_cursors_and_receipts_never_rewind(store):
+    job = create(store)
+    store.update(job["id"], status="completed", answer="answer")
+    assert store.begin_delivery(job["id"]) is True
+    assert store.begin_delivery(job["id"]) is False
+    assert store.advance_delivery(job["id"], cursor=1, receipts=["111"]) is True
+    assert store.advance_delivery(job["id"], cursor=1, receipts=["rewritten"]) is False
+    assert store.advance_delivery(job["id"], cursor=3, receipts=["111", "222", "333"]) is True
+    after = store.get(job["id"])
+    assert after["delivery_cursor"] == 3
+    assert json.loads(after["delivery_receipts"]) == ["111", "222", "333"]
+    store.complete_delivery(job["id"])
+    assert store.undelivered() == []
+    assert store.get(job["id"]) == {**after, "delivered": 1, "delivery_status": "delivered",
+                                    "updated_at": store.get(job["id"])["updated_at"]}
+    assert store.begin_delivery(job["id"]) is False
+
+
+def test_withheld_delivery_keeps_the_answer_but_stops_retries(store):
+    job = create(store)
+    store.update(job["id"], status="completed", answer="private result")
+    assert store.begin_delivery(job["id"]) is True
+    store.withhold_delivery(job["id"])
+    assert store.undelivered() == []
+    after = store.get(job["id"])
+    assert after["delivery_status"] == "withheld"
+    assert after["delivered"] == 1
+    assert after["answer"] == "private result"
+    assert after["status"] == "completed"
+
+
+def test_transient_delivery_failures_are_bounded_and_exhaustion_is_explicit(store):
+    job = create(store)
+    store.update(job["id"], status="completed", answer="answer")
+    for attempt in range(DELIVERY_ATTEMPT_LIMIT):
+        assert store.begin_delivery(job["id"]) is True
+        expected = "exhausted" if attempt == DELIVERY_ATTEMPT_LIMIT - 1 else "pending"
+        assert store.note_delivery_failure(job["id"]) == expected
+    after = store.get(job["id"])
+    assert after["delivery_status"] == "exhausted"
+    assert after["delivery_attempts"] == DELIVERY_ATTEMPT_LIMIT
+    assert store.undelivered() == []
+    assert after["delivered"] == 0
+    assert after["answer"] == "answer"
+
+
+def test_crash_after_receipt_freezes_unknown_without_resending(tmp_path):
+    # Part 3's send may have landed before the process died. That outcome is
+    # frozen for reconciliation, never silently replayed.
+    path = str(tmp_path / "jobs.sqlite")
+    first = JobStore(path)
+    job = create(first)
+    first.update(job["id"], status="completed", answer="multi-part answer")
+    assert first.begin_delivery(job["id"]) is True
+    assert first.advance_delivery(job["id"], cursor=2, receipts=["1", "2"]) is True
+    first.close()  # crash after two acknowledged parts, mid third send
+    restarted = JobStore(path)
+    try:
+        after = restarted.get(job["id"])
+        assert after["delivery_status"] == "unknown"
+        assert after["delivery_cursor"] == 2
+        assert restarted.undelivered() == []  # never auto-replayed
+        assert restarted.begin_delivery(job["id"]) is False
+        assert restarted.reconcile_unknown_delivery(job["id"], retry=True) is True
+        assert [row["id"] for row in restarted.undelivered()] == [job["id"]]
+        # Retry resumes strictly after the acknowledged parts.
+        assert restarted.get(job["id"])["delivery_cursor"] == 2
+        assert restarted.reconcile_unknown_delivery(job["id"], retry=True) is False
+    finally:
+        restarted.close()
+
+
+def test_uncertain_first_send_requires_operator_receipt(tmp_path):
+    path = str(tmp_path / "jobs.sqlite")
+    first = JobStore(path)
+    job = create(first)
+    first.update(job["id"], status="completed", answer="answer")
+    assert first.begin_delivery(job["id"]) is True
+    first.close()  # crash while the first send may have reached Discord
+    restarted = JobStore(path)
+    try:
+        after = restarted.get(job["id"])
+        assert after["delivery_status"] == "unknown"
+        assert after["delivery_cursor"] == 0
+        assert after["answer"] == "answer"
+        assert restarted.undelivered() == []
+        with pytest.raises(ValueError, match="confirmed Discord message ID"):
+            restarted.reconcile_unknown_delivery(job["id"], retry=False)
+        assert restarted.get(job["id"])["delivery_status"] == "unknown"
+        # The operator found the message on Discord and supplies its ID.
+        assert restarted.reconcile_unknown_delivery(job["id"], retry=False, confirmed_message_id=888) is True
+        final = restarted.get(job["id"])
+        assert final["delivery_status"] == "pending" and final["delivered"] == 0
+        assert final["delivery_cursor"] == 1
+        assert json.loads(final["delivery_receipts"]) == ["888"]
+        assert [row["id"] for row in restarted.undelivered()] == [job["id"]]
+    finally:
+        restarted.close()
+
+
+def test_abandoned_submission_is_terminal_and_undelivered(store):
+    job = create(store, ready=False)
+    store.abandon_submission(job["id"], "Task submission failed before execution.")
+    after = store.get(job["id"])
+    assert after["status"] == "failed"
+    assert after["delivered"] == 1
+    assert store.undelivered() == []
+    assert store.transition(job["id"], to="queued") is False

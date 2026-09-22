@@ -11,7 +11,7 @@ def prepare(source: Path, output: Path, persona: Path) -> None:
     config['persona']['system_prompt']=persona.read_text().strip()
     inference=config['inference']
     inference['extra_request_body']={**inference.get('extra_request_body',{}),
-        'chat_template_kwargs':{'enable_thinking':True}}
+        'chat_template_kwargs':{'enable_thinking':False}}
     inference['max_tokens']=4096
     inference['timeout_seconds']=120
     config.setdefault('agent',{}).update(max_total_tokens=8192,request_timeout_seconds=120)

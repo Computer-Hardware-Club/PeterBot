@@ -71,7 +71,7 @@ async def main():
         job=gateway.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel_id,
             source_message_id=123456789012345680,prompt=prompt,delivery_mode='channel' if conversational else 'private',
             input_files=[{'name':'numbers.csv','data_base64':base64.b64encode(b'amount\n10\n20\n30\n').decode()}])
-        gateway.jobs.update(job['id'],status='running')
+        assert gateway.jobs.claim(job['id']), 'Smoke job could not claim its queue slot'
         await gateway.run_job(gateway.jobs.get(job['id']))
         result=gateway.jobs.get(job['id'])
         artifacts=json.loads(result['artifacts'])

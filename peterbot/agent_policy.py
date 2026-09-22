@@ -37,14 +37,33 @@ class Principal:
 
 
 @dataclass(frozen=True)
+class ControlIntent:
+    """Source-bound privileged action, constructed by the trusted gateway."""
+
+    guild_id: int
+    user_id: int
+    channel_id: int
+    source_message_id: int
+    action: str
+
+    def __post_init__(self) -> None:
+        for name in ("guild_id", "user_id", "channel_id", "source_message_id"):
+            if not _valid_id(getattr(self, name)):
+                raise ValueError(f"{name} must be a Discord ID")
+        if self.action not in {"club_fact", "roster", "style", "announcement"}:
+            raise ValueError("Unknown control action")
+
+
+@dataclass(frozen=True)
 class AgentPolicy:
     allowed_guild_ids: frozenset[int] = field(default_factory=frozenset)
     officer_role_ids: frozenset[int] = field(default_factory=frozenset)
     owner_user_ids: frozenset[int] = field(default_factory=frozenset)
     officer_only: bool = True
+    control_channel_ids: frozenset[int] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        for name in ("allowed_guild_ids", "officer_role_ids", "owner_user_ids"):
+        for name in ("allowed_guild_ids", "officer_role_ids", "owner_user_ids", "control_channel_ids"):
             values = getattr(self, name)
             if not isinstance(values, frozenset) or any(not _valid_id(v) for v in values):
                 raise ValueError(f"{name} must be a frozenset of Discord IDs")
@@ -83,3 +102,14 @@ class AgentPolicy:
             raise PolicyDenied("Unknown memory scope")
         if write and scope == "club" and not self.is_officer(principal):
             raise PolicyDenied("Only an officer can change shared club memory")
+
+    def require_control(self, principal: Principal, intent: ControlIntent, *, channel_is_private: bool) -> None:
+        self.require_guild(principal)
+        if not isinstance(intent, ControlIntent):
+            raise PolicyDenied("A source-bound control request is required")
+        if (intent.guild_id, intent.user_id, intent.channel_id) != (principal.guild_id, principal.user_id, principal.channel_id):
+            raise PolicyDenied("The control request does not match its verified Discord source")
+        if not self.is_officer(principal):
+            raise PolicyDenied("Only a current officer can make this change")
+        if intent.channel_id not in self.control_channel_ids or channel_is_private is not True:
+            raise PolicyDenied("Use the configured private officer control channel")

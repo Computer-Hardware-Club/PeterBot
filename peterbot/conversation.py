@@ -37,7 +37,7 @@ async def reply_or_use_tools(session, config, principal, prompt: str, context: l
     messages.append({'role':'user','content':prompt})
     payload={'model':config.inference.model,'messages':messages,'tools':[TOOL_HANDOFF],
              'tool_choice':'auto','parallel_tool_calls':False,'stream':False,'n':1,
-             'max_tokens':2048,'temperature':0.6,'chat_template_kwargs':{'enable_thinking':True}}
+             'max_tokens':2048,'temperature':0.6,'chat_template_kwargs':{'enable_thinking':False}}
     base=config.inference.base_url.rstrip('/')
     url=base+('/chat/completions' if base.endswith('/v1') else '/v1/chat/completions')
     headers={'Authorization':'Bearer '+config.llama_cpp_api_key} if config.llama_cpp_api_key else {}

@@ -1,6 +1,6 @@
 # Operating Hermes-backed Peter
 
-Hermes is an immutable upstream source dependency, not a fork or submodule. The worker Dockerfile installs the pinned revision in `requirements-hermes.txt` using the upstream-required editable installation. Runtime root files remain read-only. Hermes streaming is explicitly disabled because Peter's capability proxy returns non-streamed completions; reasoning remains enabled. Do not update Hermes without the adapter tests and a real-model smoke test.
+Hermes is an immutable upstream source dependency, not a fork or submodule. The worker Dockerfile installs the pinned revision in `requirements-hermes.txt` using the upstream-required editable installation. Runtime root files remain read-only. Hermes streaming is explicitly disabled because Peter's capability proxy returns non-streamed completions; reasoning is disabled for the served Flash Next model so bounded Discord tasks receive usable tool calls and final answers. Do not update Hermes without the adapter tests and a real-model smoke test.
 
 ## Services and authority
 
@@ -29,7 +29,7 @@ Ordinary mentions are conversational: Peter answers in the original channel with
 
 For explicitly requested private tasks, Discord server administrators and members with Manage Threads may be able to access private threads; they are not confidential from server administration. Task ownership still prevents another user from taking over a task. The pilot accepts at most three UTF-8 text/code attachments totaling 128 KiB (one attachment in `/task`, multiple through mentions/follow-ups). Generated artifacts total at most 8 MiB. Images, Office/PDF uploads, arbitrary internet/package access, outbound messaging tools, server administration, native global memory/session search, cron and subagents are not exposed yet.
 
-One agent task runs at a time. At most two tasks per user and 20 globally may be pending. Default limits are 20 minutes per task, 30 Hermes iterations, 8192 tokens per response, and a total allocated output budget of 131072 tokens. Thinking is enabled by the trusted model proxy regardless of caller flags. These are independent of legacy member-chat budgets. `deploy/prepare_hermes_config.py` generates a bot config with the stable persona, thinking enabled for member chat too, a 4096-token response allowance and a 120-second legacy request limit. Preserve a backup before replacing production JSON.
+One agent task runs at a time. At most two tasks per user and 20 globally may be pending. Default limits are 20 minutes per task, 30 Hermes iterations, 8192 tokens per response, and a total allocated output budget of 131072 tokens. The trusted model proxy disables thinking for Flash Next task requests so reasoning cannot consume the entire bounded response budget before a tool call or final answer. These are independent of legacy member-chat budgets. `deploy/prepare_hermes_config.py` generates a bot config with the stable persona, thinking disabled for member chat, a 4096-token response allowance and a 120-second legacy request limit. Preserve a backup before replacing production JSON.
 
 ## Persistence and delivery
 
