@@ -261,12 +261,15 @@ def test_fast_model_answers_or_hands_off_without_exposing_reasoning(tmp_path, ha
 
 
 @pytest.mark.parametrize("name,arguments", [("terminal", "{}"), ("use_tools", '{"user_id":2}')])
-def test_fast_model_cannot_select_tools_or_identity_beyond_handoff(tmp_path, name, arguments):
+def test_invented_fast_model_tool_decision_hands_off_instead_of_erroring(tmp_path, name, arguments):
+    """A tool name or argument shape the fast model invented is a model wobble, not a
+    member-facing error: hand the request to the sandbox, which re-checks authority and
+    honours only its own allowlist."""
     async def scenario():
         async with conversation_gateway(tmp_path) as (gateway, _):
             gateway.session.result = {"choices": [{"message": {"tool_calls": [
                 {"function": {"name": name, "arguments": arguments}}]}}]}
-            with pytest.raises(ValueError):
-                await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi", [])
+            reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi", [])
+            assert reply is None
             assert gateway.jobs.pending() == []
     asyncio.run(scenario())

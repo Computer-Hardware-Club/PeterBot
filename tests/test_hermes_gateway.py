@@ -21,10 +21,14 @@ class UpstreamSession:
         self.calls = []
         self.close = AsyncMock()
         self.result = {"choices": [{"message": {"role": "assistant", "content": "result"}}]}
+        self.results = None
 
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        result = self.result
+        if self.results:
+            result = self.results[min(len(self.calls) - 1, len(self.results) - 1)]
+        else:
+            result = self.result
 
         async def chunks(size):
             yield json.dumps(result).encode()

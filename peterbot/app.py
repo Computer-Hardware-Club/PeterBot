@@ -108,6 +108,7 @@ def run_bot() -> None:
         from .hermes_gateway import HermesGateway
         from .hermes_commands import register_agent_commands
         runtime.hermes = HermesGateway(bot, config, HermesSettings.load(os.environ["PETERBOT_HERMES_CONFIG"]))
+        runtime.hermes.knowledge = runtime.knowledge_index
         register_agent_commands(bot, runtime.hermes)
         original_close = bot.close
         async def close_with_agent():

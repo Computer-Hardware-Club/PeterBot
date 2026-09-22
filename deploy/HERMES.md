@@ -29,7 +29,23 @@ Ordinary mentions are conversational: Peter answers in the original channel with
 
 For explicitly requested private tasks, Discord server administrators and members with Manage Threads may be able to access private threads; they are not confidential from server administration. Task ownership still prevents another user from taking over a task. The pilot accepts at most three UTF-8 text/code attachments totaling 128 KiB (one attachment in `/task`, multiple through mentions/follow-ups). Generated artifacts total at most 8 MiB. Images, Office/PDF uploads, arbitrary internet/package access, outbound messaging tools, server administration, native global memory/session search, cron and subagents are not exposed yet.
 
-One agent task runs at a time. At most two tasks per user and 20 globally may be pending. Default limits are 20 minutes per task, 30 Hermes iterations, 8192 tokens per response, and a total allocated output budget of 131072 tokens. Thinking is enabled by the trusted model proxy regardless of caller flags. These are independent of legacy member-chat budgets. `deploy/prepare_hermes_config.py` generates a bot config with the stable persona, thinking enabled for member chat too, a 4096-token response allowance and a 120-second legacy request limit. Preserve a backup before replacing production JSON.
+One agent task runs at a time. At most two tasks per user and 20 globally may be pending. Default limits are 20 minutes per task, 30 Hermes iterations, 8192 tokens per response, and a total allocated output budget of 131072 tokens. Thinking is enabled by the trusted model proxy regardless of caller flags. These are independent of legacy member-chat budgets. `deploy/prepare_hermes_config.py` generates a bot config with the stable persona, thinking enabled for member chat too, a 4096-token response allowance and a 240-second legacy request limit. Preserve a backup before replacing production JSON.
+
+## Fast conversational turn
+
+The first model turn on a mention decides whether to answer or hand the request to the sandbox. That turn runs with thinking enabled, because the deployed reasoning model does not emit tool calls reliably without it, and its completion budget (4096, and never below that) leaves room for thinking as well as the answer. Thinking is billed against the same budget, so a 2k allowance truncates mid-thought and returns an empty answer.
+
+Reliability rules for that turn, all enforced in `conversation.py`:
+
+- A blank answer is retried once with thinking disabled, which is the reliably non-empty path, plus an instruction to answer plainly.
+- Two blank answers return a short human line. Members never see an internal error string from a model wobble.
+- A blank answer never starts sandbox work by itself: only an explicit handoff does.
+- A tool name or argument shape the fast model invented is treated as a handoff, not an error. The sandbox re-checks authority and honours only its own allowlist, so failing toward doing the work is the safe direction.
+- Only wall-clock that is actually left is spent: the turn honours `inference.timeout_seconds`, and the retry shares the remaining budget instead of getting a fresh one.
+
+Club facts come from `club-knowledge.md`, baked into the gateway image and loaded through `paths.knowledge_file`. The file must exist: a missing one fails config load rather than silently letting Peter answer club questions from guesses. Both the conversational turn and the sandbox persona receive the same excerpt.
+
+Sandbox model calls get their own deadline (up to 600 seconds, bounded by `job_timeout`). The session-wide client deadline is far too short for a reasoning model writing thousands of tokens.
 
 ## Persistence and delivery
 

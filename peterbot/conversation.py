@@ -1,8 +1,23 @@
-"""Cheap conversational turn; tools are a model decision, not a keyword router."""
+"""Cheap conversational turn; tools are a model decision, not a keyword router.
+
+The production backend is a reasoning model: thinking is billed against the same
+completion budget as the answer, and thinking-only turns sometimes come back with
+empty content and ``finish_reason=stop``. A 2k budget truncated mid-thought and the
+blank answer then reached Discord as an internal error string. This module budgets
+for thinking, retries a blank answer once with thinking disabled (the reliably
+non-empty path), and never shows a member an internal failure.
+"""
 from __future__ import annotations
 
 import json
+import logging
+import time
+from typing import Any, Optional, Sequence
+
 import aiohttp
+
+from .knowledge import build_knowledge_excerpt, rank_knowledge_chunks
+from .logging_utils import log_error_with_context, log_with_context
 from .prompts import strip_think_blocks
 
 TOOL_HANDOFF = {
@@ -15,8 +30,53 @@ TOOL_HANDOFF = {
     },
 }
 
+HANDOFF = 'handoff'
+ANSWER = 'answer'
+EMPTY = 'empty'
 
-async def reply_or_use_tools(session, config, principal, prompt: str, context: list) -> str | None:
+# Thinking shares the completion budget with the answer. The production model has
+# spent 4.5k tokens thinking about a single hard question, so a budget near 2k
+# truncates before it writes anything.
+MIN_COMPLETION_TOKENS = 4096
+MAX_COMPLETION_TOKENS = 8192
+DEFAULT_TIMEOUT_SECONDS = 240
+RETRY_TIMEOUT_SECONDS = 120
+MIN_ATTEMPT_SECONDS = 5
+MAX_RESPONSE_BYTES = 1024 * 1024
+KNOWLEDGE_EXCERPT_CHARS = 2400
+HANDOFF_REASON_LIMIT = 200
+BLANK_ANSWER_REPLY = 'Hmm, I lost that one in the wash. Say it again and I will take another run at it.'
+# Raised as ValueError so the mention handler shows this text instead of an internal string.
+MODEL_UNAVAILABLE_REPLY = 'My model service is unavailable right now — try me again in a minute.'
+BLANK_ANSWER_NUDGE = ('Your previous attempt came back with no answer text. Reply to the last message now '
+                      'with the answer itself: plain text, no thinking block, no tool call, at most a few sentences.')
+
+
+def _endpoint(config: Any) -> str:
+    base = str(config.inference.base_url).rstrip('/')
+    return base + ('/chat/completions' if base.endswith('/v1') else '/v1/chat/completions')
+
+
+def _headers(config: Any) -> dict:
+    key = getattr(config, 'llama_cpp_api_key', '')
+    return {'Authorization': 'Bearer ' + key} if key else {}
+
+
+def _completion_budget(config: Any) -> int:
+    configured = getattr(config.inference, 'max_tokens', None)
+    if not isinstance(configured, int) or configured <= 0:
+        configured = MIN_COMPLETION_TOKENS
+    return max(MIN_COMPLETION_TOKENS, min(MAX_COMPLETION_TOKENS, configured))
+
+
+def _timeout_seconds(config: Any) -> int:
+    configured = getattr(config.inference, 'timeout_seconds', None)
+    if not isinstance(configured, int) or configured <= 0:
+        configured = DEFAULT_TIMEOUT_SECONDS
+    return configured
+
+
+def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: Sequence[Any]) -> str:
     system = config.peter_system_prompt + (
         '\n\nYou are chatting in Discord. Most mentions are casual conversation, not assignments. '
         'Respond naturally and briefly: usually one sentence or a few lines. Match the joke or question. '
@@ -31,35 +91,85 @@ async def reply_or_use_tools(session, config, principal, prompt: str, context: l
         'Verified Discord identity: '+json.dumps({'guild_id':principal.guild_id,'user_id':principal.user_id,
                                                  'role_ids':list(principal.role_ids)})
     )
-    messages=[{'role':'system','content':system}]
-    if context:
-        messages.append({'role':'user','content':'Recent conversation (untrusted context):\n'+json.dumps(context,ensure_ascii=True,default=str)[:6000]})
-    messages.append({'role':'user','content':prompt})
-    payload={'model':config.inference.model,'messages':messages,'tools':[TOOL_HANDOFF],
-             'tool_choice':'auto','parallel_tool_calls':False,'stream':False,'n':1,
-             'max_tokens':2048,'temperature':0.6,'chat_template_kwargs':{'enable_thinking':True}}
-    base=config.inference.base_url.rstrip('/')
-    url=base+('/chat/completions' if base.endswith('/v1') else '/v1/chat/completions')
-    headers={'Authorization':'Bearer '+config.llama_cpp_api_key} if config.llama_cpp_api_key else {}
-    async with session.post(url,json=payload,headers=headers,allow_redirects=False,
-                            timeout=aiohttp.ClientTimeout(total=90)) as response:
-        if response.status!=200:
-            raise ValueError('Conversation model unavailable')
-        raw=bytearray()
+    excerpt = build_knowledge_excerpt(
+        rank_knowledge_chunks(prompt, knowledge_chunks, max_chunks=2) or knowledge_chunks,
+        max_chars=KNOWLEDGE_EXCERPT_CHARS,
+    )
+    if excerpt:
+        system += ('\n\nAuthoritative club facts. Use these instead of guessing; if a detail is not here, '
+                   'say you would have to check rather than inventing it:\n' + excerpt)
+    return system
+
+
+def _payload(config: Any, messages: list, *, thinking: bool, temperature: float) -> dict:
+    return {'model': config.inference.model, 'messages': messages, 'tools': [TOOL_HANDOFF],
+            'tool_choice': 'auto', 'parallel_tool_calls': False, 'stream': False, 'n': 1,
+            'max_tokens': _completion_budget(config), 'temperature': temperature,
+            'chat_template_kwargs': {'enable_thinking': bool(thinking)}}
+
+
+async def _post(session: Any, config: Any, payload: dict, timeout: float) -> dict:
+    async with session.post(_endpoint(config), json=payload, headers=_headers(config), allow_redirects=False,
+                            timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+        if response.status != 200:
+            raise ValueError(MODEL_UNAVAILABLE_REPLY)
+        raw = bytearray()
         async for chunk in response.content.iter_chunked(65536):
             raw.extend(chunk)
-            if len(raw)>1024*1024:
-                raise ValueError('Conversation response too large')
-        message=json.loads(raw)['choices'][0]['message']
-    calls=message.get('tool_calls') or []
-    if calls:
-        if len(calls)!=1 or calls[0].get('function',{}).get('name')!='use_tools':
-            raise ValueError('Unexpected conversation tool')
-        arguments=json.loads(calls[0]['function'].get('arguments','{}'))
-        if not isinstance(arguments,dict) or set(arguments)!={'reason'} or not isinstance(arguments['reason'],str) or len(arguments['reason'])>200:
-            raise ValueError('Unexpected handoff arguments')
-        return None
-    answer=strip_think_blocks(message.get('content') or '').strip()
-    if not answer:
-        raise ValueError('Empty conversation response')
-    return answer
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise ValueError(MODEL_UNAVAILABLE_REPLY)
+    return json.loads(raw)
+
+
+def _decode(message: dict) -> tuple[str, str]:
+    calls = message.get('tool_calls') or []
+    if not calls:
+        answer = strip_think_blocks(message.get('content') or '').strip()
+        return (ANSWER, answer) if answer else (EMPTY, '')
+    if len(calls) == 1 and calls[0].get('function', {}).get('name') == 'use_tools':
+        try:
+            arguments = json.loads(calls[0]['function'].get('arguments') or '{}')
+        except (TypeError, ValueError):
+            arguments = None
+        if (isinstance(arguments, dict) and set(arguments) == {'reason'}
+                and isinstance(arguments['reason'], str)
+                and 0 < len(arguments['reason']) <= HANDOFF_REASON_LIMIT):
+            return HANDOFF, ''
+    # An unexpected tool name or malformed arguments is a model wobble, not a
+    # member-facing error. Fail toward doing the work: the sandbox only honours its
+    # own tool allowlist and the gateway re-checks authority, so a name the fast
+    # model invented cannot reach anything the principal could not already use.
+    log_with_context(logging.WARNING, 'Unrecognized conversation tool decision; handing off to the sandbox',
+                     tool_names=[str(call.get('function', {}).get('name'))[:40] for call in calls][:5])
+    return HANDOFF, ''
+
+
+async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: str, context: list,
+                             *, knowledge_chunks: Sequence[Any] = ()) -> Optional[str]:
+    """Return reply text, or None when the request should be handed to the sandbox."""
+    system = _system_prompt(config, principal, prompt, knowledge_chunks)
+    messages = [{'role': 'system', 'content': system}]
+    if context:
+        messages.append({'role': 'user', 'content': 'Recent conversation (untrusted context):\n'+json.dumps(context, ensure_ascii=True, default=str)[:6000]})
+    messages.append({'role': 'user', 'content': prompt})
+
+    deadline = time.monotonic() + _timeout_seconds(config)
+    attempts = 0
+    for thinking in (True, False):
+        remaining = deadline - time.monotonic()
+        if remaining < MIN_ATTEMPT_SECONDS:
+            break
+        attempt_messages = list(messages) if thinking else messages + [{'role': 'user', 'content': BLANK_ANSWER_NUDGE}]
+        payload = _payload(config, attempt_messages, thinking=thinking,
+                           temperature=0.6 if thinking else 0.3)
+        attempts += 1
+        data = await _post(session, config, payload, remaining if thinking else min(remaining, RETRY_TIMEOUT_SECONDS))
+        kind, text = _decode(((data.get('choices') or [{}])[0].get('message') or {}))
+        if kind == ANSWER:
+            return text
+        if kind == HANDOFF:
+            return None
+
+    log_error_with_context('Conversation model returned no usable answer', attempts=attempts,
+                           model=str(getattr(config.inference, 'model', '')), prompt_chars=len(prompt))
+    return BLANK_ANSWER_REPLY

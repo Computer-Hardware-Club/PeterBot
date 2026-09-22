@@ -19,7 +19,9 @@ import discord
 from .agent_jobs import JobStore
 from .agent_memory import ScopedMemoryStore, MemoryConflict
 from .agent_policy import AgentPolicy, Principal, PolicyDenied
+from .conversation import KNOWLEDGE_EXCERPT_CHARS
 from .hermes_settings import HermesSettings
+from .knowledge import KnowledgeIndex, build_knowledge_excerpt
 from .tools import ToolExecutor
 from .prompts import strip_think_blocks
 
@@ -89,6 +91,9 @@ class HermesGateway:
         self.jobs = JobStore(str(state_dir / 'tasks.sqlite3'))
         self.memory = ScopedMemoryStore(str(Path(settings.state_dir) / 'memory.sqlite3'), self.policy)
         self.tools = ToolExecutor(config.agent.search_base_url)
+        # Club facts live in a versioned knowledge file rather than in the persona
+        # string, so both the fast conversational turn and the sandbox get them.
+        self.knowledge = KnowledgeIndex()
         self.capabilities: dict[str, Capability] = {}
         self.active: dict[str, asyncio.Task] = {}
         self.session: aiohttp.ClientSession | None = None
@@ -135,7 +140,17 @@ class HermesGateway:
 
     async def conversational_reply(self, principal, prompt, context):
         from .conversation import reply_or_use_tools
-        return await reply_or_use_tools(self.session,self.config,principal,prompt,context)
+        return await reply_or_use_tools(self.session,self.config,principal,prompt,context,
+                                        knowledge_chunks=self.knowledge.chunks)
+
+    def club_persona(self) -> str:
+        """Persona plus the authoritative club facts, for sandbox jobs."""
+        excerpt=build_knowledge_excerpt(self.knowledge.chunks,max_chars=KNOWLEDGE_EXCERPT_CHARS)
+        if not excerpt:
+            return self.config.peter_system_prompt
+        return (self.config.peter_system_prompt+
+                '\n\nAuthoritative club facts. Use these instead of guessing; if a detail is not here, '
+                'say you would have to check rather than inventing it:\n'+excerpt)
 
     async def respond_to_message(self, message, prompt):
         from .context import get_recent_channel_entries, send_chunked_reply
@@ -228,7 +243,11 @@ class HermesGateway:
             if self.config.llama_cpp_api_key:
                 headers['Authorization'] = 'Bearer ' + self.config.llama_cpp_api_key
             try:
-                async with self.session.post(url,json=payload,headers=headers,allow_redirects=False) as response:
+                # A reasoning model can spend minutes on one 8k-token sandbox call; the
+                # session-wide deadline is far too short for it.
+                model_timeout = max(60, min(self.settings.job_timeout, 600))
+                async with self.session.post(url,json=payload,headers=headers,allow_redirects=False,
+                                             timeout=aiohttp.ClientTimeout(total=model_timeout)) as response:
                     data = await read_bounded(response.content, 4 * 1024 * 1024)
                     if len(data) > 4 * 1024 * 1024 or response.status != 200:
                         log.warning('Task inference failed: job=%s upstream_status=%s',cap.job['id'],response.status)
@@ -415,7 +434,7 @@ class HermesGateway:
             payload = {'job_id':job['id'],'request':{
                 'prompt':job['prompt'],'input_files':json.loads(job.get('input_files','[]')),'identity':{'guild_id':p.guild_id,'user_id':p.user_id,
                     'channel_id':p.channel_id,'role_ids':list(p.role_ids),'is_officer':self.policy.is_officer(p)},
-                'persona':self.config.peter_system_prompt,'response_style':'conversation' if conversational else 'task',
+                'persona':self.club_persona(),'response_style':'conversation' if conversational else 'task',
                 'prior_messages':prior,
                 'memory_snapshots':{'personal':[] if conversational else self.memory.search(p,scope='personal',limit=10),
                                     'club':self.memory.search(p,scope='club',limit=10)},
