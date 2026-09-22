@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone
+from typing import Any
 
 
 def now() -> str:
@@ -25,7 +26,7 @@ class JobStore:
             answer TEXT NOT NULL DEFAULT '', artifacts TEXT NOT NULL DEFAULT '[]',
             delivered INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
         columns = {r[1] for r in self.db.execute('PRAGMA table_info(jobs)')}
-        for name, definition in {'input_files':"TEXT NOT NULL DEFAULT '[]'", 'delivery_cursor':'INTEGER NOT NULL DEFAULT 0', 'delivery_mode':"TEXT NOT NULL DEFAULT 'private'", 'context':"TEXT NOT NULL DEFAULT '[]'"}.items():
+        for name, definition in {'input_files':"TEXT NOT NULL DEFAULT '[]'", 'delivery_cursor':'INTEGER NOT NULL DEFAULT 0', 'delivery_mode':"TEXT NOT NULL DEFAULT 'private'", 'context':"TEXT NOT NULL DEFAULT '[]'", 'status_message_id':'INTEGER'}.items():
             if name not in columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
         with self.db:
@@ -33,7 +34,7 @@ class JobStore:
             self.db.execute("UPDATE jobs SET status='interrupted', answer='The gateway restarted during this task. Use /continue_task to resume from the saved objective.', updated_at=? WHERE status='running'", (now(),))
 
     def create(self, *, guild_id: int, user_id: int, channel_id: int,
-               source_message_id: int, prompt: str, parent_id: str | None = None, input_files: list | None = None, ready: bool = True, delivery_mode: str = 'private', context: list | None = None) -> dict:
+               source_message_id: int, prompt: str, parent_id: str | None = None, input_files: list | None = None, ready: bool = True, delivery_mode: str = 'private', context: list | None = None, status_message_id: int | None = None) -> dict:
         if not prompt.strip() or len(prompt) > 16000:
             raise ValueError('Please use a task description between 1 and 16,000 characters.')
         if delivery_mode not in {'private','channel'}:
@@ -43,7 +44,7 @@ class JobStore:
         with self.db:
             self.db.execute('INSERT INTO jobs (id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
                             (job_id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,'queued' if ready else 'preparing',now(),now()))
-            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=? WHERE id=?',(json.dumps(input_files or []),delivery_mode,json.dumps(context or []),job_id))
+            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=?,status_message_id=? WHERE id=?',(json.dumps(input_files or []),delivery_mode,json.dumps(context or []),status_message_id,job_id))
         return self.get(job_id)
 
     def check_capacity(self, user_id: int) -> None:
@@ -83,8 +84,9 @@ class JobStore:
         return [dict(r) for r in self.db.execute("SELECT * FROM jobs WHERE delivered=0 AND status NOT IN ('queued','running') ORDER BY created_at LIMIT 20")]
 
     def update(self, job_id: str, *, status: str | None = None, answer: str | None = None,
-               artifacts: list | None = None, delivered: bool | None = None, delivery_cursor: int | None = None) -> None:
-        fields = {'updated_at': now()}
+               artifacts: list | None = None, delivered: bool | None = None, delivery_cursor: int | None = None,
+               status_message_id: int | None = None) -> None:
+        fields: dict[str, Any] = {'updated_at': now()}
         if status is not None:
             if status not in {'queued','running','completed','failed','cancelled','timeout','interrupted'}:
                 raise ValueError('Invalid task status')
@@ -95,6 +97,8 @@ class JobStore:
             fields['artifacts'] = json.dumps(artifacts)
         if delivery_cursor is not None:
             fields['delivery_cursor']=delivery_cursor
+        if status_message_id is not None:
+            fields['status_message_id']=status_message_id
         if delivered is not None:
             fields['delivered'] = int(delivered)
         with self.db:

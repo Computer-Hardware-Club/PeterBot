@@ -181,9 +181,10 @@ def test_ask_keeps_normal_reply_when_hermes_is_enabled(setup_handlers):
 
 
 @pytest.mark.parametrize("answer", ["lol, fair.", None])
-def test_conversation_replies_directly_or_escalates_silently(tmp_path, answer):
+def test_conversation_replies_directly_or_escalates_visibly(tmp_path, answer):
     async def scenario():
         async with conversation_gateway(tmp_path) as (gateway, channel):
+            channel.send.return_value = SimpleNamespace(id=777, edit=AsyncMock())
             gateway.conversational_reply = AsyncMock(return_value=answer)
             gateway.submit = AsyncMock()
             message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
@@ -192,16 +193,22 @@ def test_conversation_replies_directly_or_escalates_silently(tmp_path, answer):
                                       created_at=datetime.now(timezone.utc))
             await gateway.respond_to_message(message, "Hey Peter")
             channel.create_thread.assert_not_awaited()
-            channel.send.assert_not_awaited()
             gateway.conversational_reply.assert_awaited_once()
             if answer is None:
+                # Work that runs for minutes is announced, in the message that will later
+                # hold the answer, instead of leaving the channel silent.
                 message.reply.assert_not_awaited()
+                channel.send.assert_awaited_once()
+                assert "on it" in channel.send.await_args.args[0]
                 gateway.submit.assert_awaited_once()
                 submitted = gateway.submit.await_args.kwargs
                 assert submitted["in_channel"] is True
                 assert submitted["channel"] is channel
                 assert submitted["source_message_id"] == 30
+                assert submitted["status_message_id"] == 777
             else:
+                # A quick answer never posts a placeholder first.
+                channel.send.assert_not_awaited()
                 gateway.submit.assert_not_awaited()
                 message.reply.assert_awaited_once()
                 assert message.reply.await_args.args[0] == answer
