@@ -65,6 +65,14 @@ Production paths on p910:
 
 Build the gateway target `bot` in `Dockerfile`, runner in `docker/Dockerfile.hermes-runner`, and worker in `docker/Dockerfile.hermes-worker`. Set all three image variables in the deployment `.env`. Start the runner, wait for its health, run `deploy/smoke_hermes.py` in a disposable gateway container with synthetic identity and temporary state, and run `deploy/check_hermes_isolation.py` inside an actual restricted worker. Do not run two Discord gateways with the same token.
 
-For rollback, stop/remove only the new `peterbot` container, restore the saved Compose file, `.env`, and `config.production.json`, then recreate `peterbot` from `peterbot:agent-58d8935`. Stop the new runner after active workers are gone. Preserve new SQLite state for diagnosis or later reuse. The dedicated worker firewall may safely remain installed.
+Three smoke scripts, in increasing distance from the sandbox:
+
+- `deploy/smoke_hermes.py`: task path. Needs the runner and a disposable gateway container on both networks, alias `gateway`, worker address `192.168.240.2`. Stop the production gateway while it holds that address.
+- `deploy/smoke_conversation.py`: same, with `PETERBOT_SMOKE_CONVERSATION=1` for the public conversation delivery mode.
+- `deploy/smoke_conversation_turn.py`: the fast conversational turn against the live model, no runner or worker needed (control network only). Six prompts covering banter, club facts, arithmetic, tool-needing requests and a file request. Every case must return reply text or a deliberate handoff, with no raised exception and no internal string in the reply. Run this after any change to `conversation.py`, the persona, or the knowledge file.
+
+Note that a handoff for "who are the current club officers?" is correct: that answer needs the live roster tool, not the static knowledge file.
+
+For rollback, stop/remove only the new `peterbot` container, restore the saved Compose file, `.env`, and `config.production.json`, then recreate `peterbot` from the previous gateway image (currently `peterbot-hermes-gateway:088c670-flashnext-v2`). Stop the new runner after active workers are gone. Preserve new SQLite state for diagnosis or later reuse. The dedicated worker firewall may safely remain installed.
 
 This Docker pilot shares p910's kernel. Move execution to a dedicated VM before widening to general member access, arbitrary network/package downloads, or more privileged capabilities. Command allowlists and model instructions are not substitutes for OS/network isolation.
