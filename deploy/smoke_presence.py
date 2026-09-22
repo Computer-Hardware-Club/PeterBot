@@ -79,6 +79,10 @@ async def main():
     settings = HermesSettings.load(os.environ['PETERBOT_HERMES_CONFIG'])
     settings = replace(settings, state_dir=os.environ['PETERBOT_SMOKE_STATE'])
     config = AppConfig.load()
+    from aiohttp import web
+    # The worker reaches the model and its tools through this process on :8770 (the smoke
+    # container holds the `gateway` alias), so the task needs the real handlers served.
+    # Without this the worker's calls fail and the run reports model_failed.
     # Use the real allowed guild and officer role, so policy checks behave as in production.
     guild_id = next(iter(settings.allowed_guild_ids))
     role_id = next(iter(settings.officer_role_ids))
@@ -97,6 +101,31 @@ async def main():
         return Principal(guild_id, user_id, channel_id, (role_id,))
     gateway.principal = principal
     gateway.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=240), trust_env=False)
+
+    async def traced_model(request):
+        started_call = time.monotonic()
+        try:
+            response = await gateway.model(request)
+        except web.HTTPException as exc:
+            print(json.dumps({'t': stamp(), 'model_http_status': exc.status,
+                              'seconds': round(time.monotonic() - started_call, 1)}), flush=True)
+            raise
+        data = json.loads(response.body)
+        message = (data.get('choices') or [{}])[0].get('message', {})
+        print(json.dumps({'t': stamp(), 'model_http_status': response.status,
+                          'seconds': round(time.monotonic() - started_call, 1),
+                          'reasoning_chars': len(message.get('reasoning') or ''),
+                          'tool_calls': [c.get('function', {}).get('name')
+                                         for c in message.get('tool_calls') or []]}), flush=True)
+        return response
+
+    app = web.Application(client_max_size=2 * 1024 * 1024)
+    app.router.add_post('/tool', gateway.tool)
+    app.router.add_post('/v1/chat/completions', traced_model)
+    app.router.add_get('/v1/models', gateway.models)
+    server = web.AppRunner(app, access_log=None)
+    await server.setup()
+    await web.TCPSite(server, '0.0.0.0', 8770).start()
 
     # The status line the member is already watching, exactly as respond_to_message posts it.
     status = await channel.send("on it — this needs real work, so give me a bit. I'll post the result here.")
@@ -130,6 +159,7 @@ async def main():
             ('file' if entry['file'] else 'text', entry['file'] or (entry['content'] or '')[:200])
             for entry in extras]
         print(json.dumps(result, ensure_ascii=True, indent=2), flush=True)
+        await server.cleanup()
         await gateway.session.close()
         gateway.jobs.close()
 
