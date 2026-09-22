@@ -10,7 +10,7 @@
   "inference": {
     "base_url": "http://127.0.0.1:8000",
     "model": "Qwen3.8-Flash-Next",
-    "timeout_seconds": 180,
+    "timeout_seconds": 420,
     "max_tokens": 4096,
     "temperature": 0.4,
     "top_p": null,

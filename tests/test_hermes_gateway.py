@@ -55,7 +55,7 @@ class UpstreamSession:
         self.calls = []
         self.close = AsyncMock()
         self.result = {"choices": [{"message": {"role": "assistant", "content": "result"}}]}
-        self.results = None
+        self.results: list | None = None
         self.fail_times = 0
 
     def post(self, url, **kwargs):

@@ -123,6 +123,29 @@ def test_conversation_requests_stream_so_a_slow_turn_is_not_a_timeout():
     assert calls[0][1]['json']['stream'] is True
 
 
+def test_budget_reserves_a_slice_for_the_cheap_retry():
+    """A hard question can spend the whole first attempt thinking. The retry must keep a
+    guaranteed slice of the deadline, or the turn ends as a failure line."""
+    session = UpstreamSession()
+    session.results = [{'choices': [{'message': {'content': '', 'reasoning': 'thinking'}}]},
+                       {'choices': [{'message': {'content': 'Answered cheaply.'}}]}]
+    result = asyncio.run(reply_or_use_tools(session, config(timeout_seconds=420), Principal(10, 1, 20, (100,)), 'hi', []))
+    assert result == 'Answered cheaply.'
+    assert session.calls[0][1]['timeout'].total == pytest.approx(290, abs=1)
+    assert session.calls[1][1]['timeout'].total == pytest.approx(120, abs=1)
+
+
+def test_short_deadline_is_split_instead_of_starving_the_first_attempt():
+    session = UpstreamSession()
+    session.results = [{'choices': [{'message': {'content': '', 'reasoning': 'thinking'}}]},
+                       {'choices': [{'message': {'content': 'Cheap.'}}]}]
+    result = asyncio.run(reply_or_use_tools(session, config(timeout_seconds=60), Principal(10, 1, 20, (100,)), 'hi', []))
+    assert result == 'Cheap.'
+    # A short deadline is split rather than handed entirely to the first attempt.
+    assert session.calls[0][1]['timeout'].total == pytest.approx(30, abs=1)
+    assert session.calls[1][1]['timeout'].total <= 120
+
+
 def test_tool_arguments_split_across_deltas_are_reassembled():
     from peterbot.conversation import _read_stream
 
