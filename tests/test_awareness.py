@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import discord
 
 from peterbot.awareness import AwarenessRouter
+from peterbot.guardrails import GuardLimits, RequestGuard
 from test_command_admission import setup_handlers
 
 
@@ -39,6 +40,46 @@ def test_name_reply_and_same_user_lease_without_ambient_model_calls():
         assert await detector.addressed(message("one more thing", author_id=2, channel_id=21, message_id=5)) is None
         current[0] = 121
         assert await detector.addressed(message("can you write some Rust?", message_id=6)) is None
+    asyncio.run(scenario())
+
+
+def test_natural_followups_renew_the_lease_and_nah_does_not_drop_it():
+    async def scenario():
+        current = [0]
+        detector = router(clock=lambda: current[0])
+        first = message("hey, peter", message_id=101)
+        assert await detector.addressed(first) == "name"
+        detector.remember(first, "name")
+        current[0] = 110
+        followup = message("Nah, qwen under the hood", message_id=102)
+        assert await detector.addressed(followup) == "followup"
+        detector.remember(followup, "followup")
+        current[0] = 220
+        another = message("alr", message_id=103)
+        assert await detector.addressed(another) == "followup"
+        detector.remember(another, "followup")
+        current[0] = 341
+        assert await detector.addressed(message("alr", message_id=104)) is None
+    asyncio.run(scenario())
+
+
+def test_name_on_its_own_last_line_addresses_peter_without_a_lease():
+    async def scenario():
+        detector = router()
+        assert await detector.addressed(message("Nah, qwen under the hood\nPeter")) == "name"
+        assert await detector.addressed(message("I was talking about Peter")) is None
+    asyncio.run(scenario())
+
+
+def test_real_other_member_address_ends_a_followup_lease():
+    async def scenario():
+        detector = router()
+        first = message("hey peter", message_id=201)
+        detector.remember(first, "name")
+        to_scott = message("Scott, can you check this?", message_id=202)
+        to_scott.guild.get_member_named = lambda name: SimpleNamespace(id=2) if name == "Scott" else None
+        assert await detector.addressed(to_scott) is None
+        assert await detector.addressed(message("alr", message_id=203)) is None
     asyncio.run(scenario())
 
 
@@ -97,21 +138,29 @@ def test_private_task_thread_followup_reaches_only_its_own_session():
 
 def test_name_and_followup_enter_existing_conversation_handler(setup_handlers):
     bot, runtime = setup_handlers
+    runtime.request_guard = RequestGuard(GuardLimits(
+        user_requests_per_minute=20, guild_requests_per_minute=120))
     runtime.hermes = SimpleNamespace(
         settings=SimpleNamespace(allowed_guild_ids=frozenset({10}),
                                  listen_channel_ids=frozenset({20}), conversation_lease_seconds=120),
         eligible=AsyncMock(return_value=True), respond_to_message=AsyncMock())
     first = message("Hey Peter", message_id=1)
-    followup = message("can you help me write this?", message_id=2)
-    unrelated = message("I was talking to Scott", author_id=2, message_id=3)
+    followup = message("Nah, can you help me write this?", message_id=2)
+    name_on_last_line = message("One more thing\nPeter", message_id=3)
+    short_followup = message("alr", message_id=4)
+    unrelated = message("I was talking to Scott", author_id=2, message_id=5)
 
     async def scenario():
         await bot.events["on_message"](first)
         await bot.events["on_message"](followup)
+        await bot.events["on_message"](name_on_last_line)
+        await bot.events["on_message"](short_followup)
         await bot.events["on_message"](unrelated)
 
     asyncio.run(scenario())
-    assert runtime.hermes.respond_to_message.await_count == 2
+    assert runtime.hermes.respond_to_message.await_count == 4
     assert runtime.hermes.respond_to_message.await_args_list[0].args[0] is first
     assert runtime.hermes.respond_to_message.await_args_list[1].args[0] is followup
+    assert runtime.hermes.respond_to_message.await_args_list[2].args[0] is name_on_last_line
+    assert runtime.hermes.respond_to_message.await_args_list[3].args[0] is short_followup
     runtime.llm_client.call_chat.assert_not_awaited()

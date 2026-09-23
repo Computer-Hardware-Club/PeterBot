@@ -22,7 +22,7 @@ class HermesSettings:
     listen_channel_ids: frozenset[int] = frozenset()
     control_channel_ids: frozenset[int] = frozenset()
     announcement_destination_ids: frozenset[int] = frozenset()
-    conversation_lease_seconds: int = 120
+    conversation_lease_seconds: int = 300
     max_iterations: int = 30
     max_tokens: int = 8192
     max_model_calls: int = 40
@@ -74,7 +74,7 @@ class HermesSettings:
             if not isinstance(values, list) or any(type(v) is not int or not 0 < v < 2**63 for v in values):
                 raise ValueError(f'{key} must contain positive integer IDs')
             channel_ids[key] = frozenset(values)
-        lease_seconds = raw.get('conversation_lease_seconds', 120)
+        lease_seconds = raw.get('conversation_lease_seconds', 300)
         if type(lease_seconds) is not int or not 30 <= lease_seconds <= 600:
             raise ValueError('Invalid conversation_lease_seconds')
         limits = {}

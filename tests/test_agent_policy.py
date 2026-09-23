@@ -84,6 +84,16 @@ def test_control_requires_current_officer_private_configured_source():
         policy().require_control(Principal(10, 1, 20, (100,)), intent, channel_is_private=True)
 
 
+def test_private_testing_channel_keeps_officer_control_role_bound():
+    configured = policy(officer_only=False, control_channel_ids=frozenset({20, 21}))
+    intent = ControlIntent(10, 1, 21, 501, "club_fact")
+    configured.require_control(Principal(10, 1, 21, (100,)), intent, channel_is_private=True)
+    with pytest.raises(PolicyDenied):
+        configured.require_control(Principal(10, 1, 21), intent, channel_is_private=True)
+    with pytest.raises(PolicyDenied):
+        configured.require_control(Principal(10, 1, 21, (100,)), intent, channel_is_private=False)
+
+
 def test_control_intent_rejects_forged_or_unknown_actions():
     with pytest.raises(ValueError):
         ControlIntent(10, 1, 20, 500, "change_policy")

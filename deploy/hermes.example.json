@@ -4,7 +4,7 @@
   "owner_user_ids": [],
   "listen_channel_ids": [],
   "control_channel_ids": [],
-  "conversation_lease_seconds": 120,
+  "conversation_lease_seconds": 300,
   "officer_only": true,
   "runner_url": "http://runner:8780",
   "tool_service_url": "http://192.168.240.2:8770",

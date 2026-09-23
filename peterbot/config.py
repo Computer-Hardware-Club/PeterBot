@@ -589,8 +589,8 @@ class AppConfig:
             for name, maximum in (("max_tool_rounds", 4), ("max_tool_calls", 8),
                                   ("max_total_tokens", 8192), ("request_timeout_seconds", 300),
                                   ("max_response_chars", 12000), ("max_prompt_chars", 8000),
-                                  ("max_concurrent", 2), ("user_requests_per_minute", 10),
-                                  ("guild_requests_per_minute", 60)):
+                                  ("max_concurrent", 2), ("user_requests_per_minute", 30),
+                                  ("guild_requests_per_minute", 180)):
                 value = getattr(self.agent, name)
                 if type(value) is not int or not 1 <= value <= maximum:
                     raise ValueError(f"agent.{name} must be between 1 and {maximum}")
