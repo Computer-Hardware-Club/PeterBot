@@ -1,9 +1,8 @@
 # Project workspaces (PETER-14) — trusted persistent project/file store
 
 Module: `peterbot/project_store.py`. Tests: `tests/test_project_store.py`.
-This document is the integration contract for the gateway and runner owners;
-no shared file has been wired yet — see *Gateway/runner wiring* for the exact
-handoff.
+The gateway now creates, saves, and restores these stores for project tasks.
+The integration details below describe the current path.
 
 ## What it is
 
@@ -135,35 +134,22 @@ returned. Symlinked or swapped blobs fail the `O_NOFOLLOW`/`fstat`/hash checks.
   is only readable through a manifest row the principal can see, and GC only
   runs when *no* manifest references it (tested).
 
-## Gateway/runner wiring (remaining, owned by other agents)
+## Gateway and runner integration
 
-Not done here — this module touches none of their files. Suggested handoff:
+The trusted gateway in `peterbot/hermes_gateway.py` owns `ProjectStore`. It
+creates or links a project to a job, saves verified worker files as a new
+version, and can preserve valid partial files after a timeout or cancellation.
+Discord attachment delivery is separate from this durable copy.
 
-1. **Save path** — in `sandbox_runner.collect_artifacts`, after
-   `safe_tar_files` succeeds on the *completed* path, hand `files` plus
-   provenance to `store.save(principal_of_job, project_id, task_id=job_id,
-   files=..., verified=True)`. For the salvage path
-   (`collect_artifacts(best_effort=True)` / `salvage()`), call `save(...,
-   verified=False, best_effort=True)`. The gateway resolves `project_id`:
-   `jobs` needs one new nullable `project_id` column (one-line ALTER pattern
-   already used in `JobStore.__init__`) plus store calls in `submit()` when a
-   continuation names a project. Discord artifact delivery can stay on the
-   existing base64 `artifacts` column; the store is the durable copy.
-2. **Restore path** — in the gateway's `_run_job` payload builder (where
-   `input_files` is assembled): when the job carries a `project_id`, call
-   `store.check_access(p, project_id)` immediately after the existing
-   `principal()` re-check, then `store.worker_payload(p, project_id,
-   task_id=job_id)` and merge its files into `request.input_files` (same
-   `{name, data_base64, sha256}` shape). On `ProjectDenied`, fail the job
-   honestly ("that project is no longer shared with you here") rather than
-   running without files.
-3. **Continuation commands** — `/task` with a "continue project X" flow: list
-   via `list_projects`, bind via `restore(task_id=new_job_id)`. Moving to a new
-   thread uses `relocate()`.
-4. **Retention** — call `store.retention_sweep()` from the same housekeeping
-   timer as PETER-16 backups; no model calls, no foreground slot.
-5. **Never** pass worker-supplied `Principal`s or project ids from model
-   output without the `check_access` gate; task ids from the jobs table only.
+For a continuation, the gateway checks the requester's current access, binds
+the new task to the saved project, and passes `worker_payload()` files to a
+fresh disposable worker. A missing or revoked project fails the continuation
+instead of silently starting with an empty workspace. The worker cannot supply
+its own `Principal` or grant access by mentioning a project ID in model output.
+
+Operator retention is a separate, explicit path: see
+[operations and retention](ops-and-retention.md). It never runs as part of an
+ordinary member turn.
 
 ## Security invariants (tested)
 

@@ -1,5 +1,10 @@
 # Dedicated worker VM on P910 (PETER-12 / PETER-13 target topology)
 
+The September 23 setup account below records the VM before the final gateway
+cutover. The [release evidence](release-evidence.md) records the completed live
+broker and member rollout; use [the cutover runbook](p910-cutover.md) for the
+current deployment procedure.
+
 Design and operator recipe. On September 23 the dedicated `peterbot-worker`
 domain and `virbr-ctl` network were provisioned on P910. The unrelated desktop
 VM was left running. The guest runner is healthy at `192.168.241.2:8780`; the

@@ -1,19 +1,22 @@
 # Peter redesign release evidence
 
-Status: September 23, 2026. The `PETER-xx` keys map to the supplied local
-backlog, not published GitHub issues. The implementation is the draft stacked
-[PR #3](https://github.com/Computer-Hardware-Club/PeterBot/pull/3), based on
-`feat/hermes-peter` (`332d366`). Gateway code revision `2800d97` is deployed
-on P910 with VM runner/worker revision `08c8968`; the gateway-only hotfix adds
-the exact typoed model-correction wording from the user's screenshot. It has
-not been merged. The hosted [push CI run](https://github.com/Computer-Hardware-Club/PeterBot/actions/runs/35922403596)
+Status: September 23, 2026 live-release snapshot. The `PETER-xx` keys map to
+the supplied local backlog, not published GitHub issues. The implementation
+was organized through stacked [PR #1](https://github.com/Computer-Hardware-Club/PeterBot/pull/1),
+[PR #2](https://github.com/Computer-Hardware-Club/PeterBot/pull/2), and
+[PR #3](https://github.com/Computer-Hardware-Club/PeterBot/pull/3).
+Gateway code revision `2800d97` was deployed on P910 with VM runner/worker
+revision `08c8968`; the gateway-only hotfix adds the exact typoed
+model-correction wording from the user's screenshot. Those deployed image
+revisions are historical and must not be inferred from the current Git head.
+The hosted [push CI run](https://github.com/Computer-Hardware-Club/PeterBot/actions/runs/35922403596)
 and [PR CI run](https://github.com/Computer-Hardware-Club/PeterBot/actions/runs/35922408559)
 both passed for `2800d97`.
 
 | Backlog | Evidence | Remaining limit |
 | --- | --- | --- |
 | PETER-01 | The [pre-cutover baseline](p910-baseline-2026-09-22.md) separates Discord, model, runner, queue, state, and firewall health. The live authenticated `/diagnostics` endpoint later reported each dependency ready. A real `#testing` greeting, brokered work, and delivered files passed. | The original reported outage was not reproduced in the baseline. |
-| PETER-02 | PR #1 changes were reconciled into foundation PR #2; PR #3 is stacked on it. CI runs the ordinary suite, compile/config checks, pinned Hermes fixture, and all three image builds without production secrets or automatic deployment. | Human review and merge remain separate. |
+| PETER-02 | PR #1 changes were reconciled into foundation PR #2; PR #3 is stacked on it. CI runs the ordinary suite, compile/config checks, pinned Hermes fixture, and all three image builds without production secrets or automatic deployment. | Git publication and P910 image deployment are separate events. |
 | PETER-03 | Preparing-job race, idempotent ingress, terminal delivery cursors, unknown receipts, cancel/complete races, and restart recovery have tests. An old four-row P910 jobs snapshot migrated without replay. Live `/cancel_task` stopped a sleeping worker, edited its status to cancelled, and left no active slot. | No claim of exactly-once Discord delivery under arbitrary outages. |
 | PETER-04 | A durable global foreground scheduler covers chat, `/ask`, `/recap`, and worker work. During live `#testing`, a second request received a truthful one-ahead acknowledgement and answered after the first worker completed. | A live two-human-user race was not available; deterministic tests cover separate identities. |
 | PETER-05 | Tiered model budgets, a shared turn deadline, safe rescue, and explicit-work handoff postcondition pass tests. Five warm-idle repetitions per case on the actual Qwen/vLLM server are in [model-latency.md](model-latency.md). Explicit coding handoff improved from 44.173 s to 2.462 s p95 in model-only probes, with 5/5 valid routes. The previous gateway revision routed a real coding request in 3.562 s, then delivered its compiled `ready.rs` file. | Previous model-routed greeting p50 was 2.007 s against a proposed 2 s target; bare greetings now skip that model call. End-to-end timing includes Discord and worker time. |
