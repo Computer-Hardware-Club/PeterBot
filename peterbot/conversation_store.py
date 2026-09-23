@@ -44,6 +44,7 @@ class ConversationStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
+            self.db.close()
             raise ValueError("Conversation database is newer than this gateway")
         if version == 0:
             with self.db:

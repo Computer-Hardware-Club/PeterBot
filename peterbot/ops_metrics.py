@@ -24,6 +24,7 @@ class MetricStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if version > 1:
+            self.db.close()
             raise ValueError("Metric database is newer than this gateway")
         if version == 0:
             with self.db:
