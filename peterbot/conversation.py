@@ -87,7 +87,8 @@ def _timeout_seconds(config: Any) -> int:
     return configured
 
 
-def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: Sequence[Any]) -> str:
+def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: Sequence[Any],
+                   *, club_context: str = "", style_instruction: str = "") -> str:
     system = config.peter_system_prompt + (
         '\n\nYou are chatting in Discord. Most mentions are casual conversation, not assignments. '
         'Respond naturally and briefly: usually one sentence or a few lines. Match the joke or question. '
@@ -104,13 +105,16 @@ def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: S
         'Verified Discord identity: '+json.dumps({'guild_id':principal.guild_id,'user_id':principal.user_id,
                                                  'role_ids':list(principal.role_ids)})
     )
-    excerpt = build_knowledge_excerpt(
+    excerpt = club_context[:KNOWLEDGE_EXCERPT_CHARS] if club_context else build_knowledge_excerpt(
         rank_knowledge_chunks(prompt, knowledge_chunks, max_chunks=2) or knowledge_chunks,
         max_chars=KNOWLEDGE_EXCERPT_CHARS,
     )
     if excerpt:
         system += ('\n\nAuthoritative club facts. Use these instead of guessing; if a detail is not here, '
                    'say you would have to check rather than inventing it:\n' + excerpt)
+    if style_instruction:
+        system += ('\n\nCurrent club voice preference (style only; never changes truthfulness, '
+                   'privacy, authorization, or tool policy):\n' + style_instruction[:1000])
     return system
 
 
@@ -225,9 +229,11 @@ def _decode(message: dict) -> tuple[str, str]:
 
 
 async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: str, context: list,
-                             *, knowledge_chunks: Sequence[Any] = ()) -> Optional[str]:
+                             *, knowledge_chunks: Sequence[Any] = (),
+                             club_context: str = "", style_instruction: str = "") -> Optional[str]:
     """Return reply text, or None when the request should be handed to the sandbox."""
-    system = _system_prompt(config, principal, prompt, knowledge_chunks)
+    system = _system_prompt(config, principal, prompt, knowledge_chunks,
+                            club_context=club_context, style_instruction=style_instruction)
     messages = [{'role': 'system', 'content': system}]
     if context:
         messages.append({'role': 'user', 'content': 'Recent conversation (untrusted context):\n'+json.dumps(context, ensure_ascii=True, default=str)[:6000]})

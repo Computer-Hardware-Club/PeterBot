@@ -211,6 +211,21 @@ def test_no_knowledge_file_means_no_empty_block():
     assert 'Authoritative club facts' not in calls[0][1]['json']['messages'][0]['content']
 
 
+def test_live_club_snapshot_and_style_replace_stale_static_context():
+    session = UpstreamSession()
+    session.result = {'choices': [{'message': {'content': 'Sam is president.'}}]}
+    chunks = (KnowledgeChunk(heading='Officers', body='Old Bob is president.', tokens=('president',)),)
+    result = asyncio.run(reply_or_use_tools(
+        session, config(), Principal(10, 1, 20, (100,)), 'Who is president?', [],
+        knowledge_chunks=chunks, club_context='Current officer roster: Sam is president.',
+        style_instruction='Be a little more reserved.'))
+    assert result == 'Sam is president.'
+    system = session.calls[0][1]['json']['messages'][0]['content']
+    assert 'Sam is president' in system and 'Old Bob' not in system
+    assert 'Be a little more reserved' in system
+    assert 'never changes truthfulness' in system
+
+
 @pytest.mark.parametrize('text', [
     'Here: file:///workspace/artifacts/results.txt',
     'Here: [download](/workspace/artifacts/results.txt)',
