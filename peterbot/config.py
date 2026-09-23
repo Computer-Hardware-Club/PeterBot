@@ -537,7 +537,7 @@ class AppConfig:
         if self.agent.enabled:
             _normalize_base_url(self.agent.search_base_url)
             for name, maximum in (("max_tool_rounds", 4), ("max_tool_calls", 8),
-                                  ("max_total_tokens", 8192), ("request_timeout_seconds", 120),
+                                  ("max_total_tokens", 8192), ("request_timeout_seconds", 300),
                                   ("max_response_chars", 12000), ("max_prompt_chars", 8000),
                                   ("max_concurrent", 2), ("user_requests_per_minute", 10),
                                   ("guild_requests_per_minute", 60)):

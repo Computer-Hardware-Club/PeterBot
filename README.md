@@ -182,7 +182,9 @@ For native local use with a separate `llama.cpp` server, set `inference.base_url
 
 ### Knowledge file
 
-Example `paths.knowledge_file`:
+The club ships `club-knowledge.md` at the repository root. It is copied into the gateway image and referenced by `paths.knowledge_file`, so club facts live in a versioned file instead of a prompt string. The configured path must exist: configuration load fails otherwise, which keeps Peter from answering club questions out of thin air.
+
+Custom example `paths.knowledge_file`:
 
 ```md
 ## Meetings

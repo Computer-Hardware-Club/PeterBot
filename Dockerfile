@@ -17,7 +17,7 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
-COPY bot.py README.md config.json .env.example ./
+COPY bot.py README.md config.json .env.example club-knowledge.md ./
 COPY docker ./docker
 COPY peterbot ./peterbot
 
@@ -30,6 +30,8 @@ USER peterbot
 ENTRYPOINT ["/usr/bin/tini", "--", "./docker/entrypoint.sh"]
 
 FROM base AS bot
+ARG PETERBOT_REVISION=unknown
+LABEL org.opencontainers.image.revision=$PETERBOT_REVISION
 
 FROM ghcr.io/ggml-org/llama.cpp:server AS llama_cpp_server
 

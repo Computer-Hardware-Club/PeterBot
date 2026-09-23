@@ -42,6 +42,12 @@ junit.xml
 # OS files
 .DS_Store
 
+# Local edit backups (never commit these)
+*.bak
+*.bak-*
+*.orig
+*.rej
+
 # Logs/runtime diagnostics
 *.log
 *.log.*

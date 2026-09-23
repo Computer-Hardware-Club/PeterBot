@@ -20,5 +20,6 @@ class PeterBotRuntime:
     knowledge_index: KnowledgeIndex
     retry_delay: timedelta
     request_guard: RequestGuard = field(default_factory=lambda: RequestGuard(GuardLimits()))
+    hermes: Any = None
     has_initialized: bool = False
     has_synced_commands: bool = False

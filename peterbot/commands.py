@@ -8,6 +8,7 @@ from typing import Any, Optional
 import discord
 from discord.ext import commands, tasks
 
+from .awareness import AwarenessRouter
 from .context import (
     build_current_mention_prompt_text,
     build_mention_context_bundle,
@@ -169,6 +170,22 @@ async def resolve_mention_images(
 
 def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
     config = runtime.config
+    awareness: AwarenessRouter | None = None
+
+    def configured_awareness() -> AwarenessRouter | None:
+        nonlocal awareness
+        settings = getattr(getattr(runtime, "hermes", None), "settings", None)
+        if not settings or not getattr(settings, "listen_channel_ids", None) or not bot.user:
+            return None
+        if awareness is None or awareness.bot_user_id != bot.user.id:
+            awareness = AwarenessRouter(
+                guild_ids=settings.allowed_guild_ids,
+                channel_ids=settings.listen_channel_ids,
+                bot_user_id=bot.user.id,
+                name=config.peter_name,
+                lease_seconds=settings.conversation_lease_seconds,
+            )
+        return awareness
 
     @tasks.loop(seconds=30)
     async def reminder_checker() -> None:
@@ -215,6 +232,9 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             channel_profiles=len(runtime.knowledge_index.channel_profiles),
         )
 
+        if getattr(runtime, "hermes", None) is not None:
+            await runtime.hermes.start()
+
         if not runtime.has_initialized:
             runtime.reminder_manager.load_reminders()
             await check_missed_reminders(
@@ -237,11 +257,34 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
 
     @bot.event
     async def on_message(message: discord.Message) -> None:
-        if message.author.bot:
+        if message.author.bot or getattr(message, "webhook_id", None):
             return
 
-        if bot.user and bot.user in message.mentions:
+        router = configured_awareness()
+        direct_mention = bool(bot.user and bot.user in (getattr(message, "mentions", None) or []))
+        address_reason = "mention" if direct_mention else (await router.addressed(message) if router else None)
+        if address_reason:
             content = build_current_mention_prompt_text(message, bot_user_id=bot.user.id)
+            if getattr(runtime, "hermes", None) is not None and await runtime.hermes.eligible(
+                getattr(message.guild,"id",None),message.author.id,message.channel.id
+            ):
+                from .agent_policy import PolicyDenied
+                admitted, reason = runtime.request_guard.acquire(user_id=message.author.id,guild_id=message.guild.id,prompt=content)
+                if not admitted:
+                    await send_chunked_reply(message,reason or 'Give me a moment.')
+                    return
+                if router:
+                    router.remember(message, address_reason)
+                try:
+                    await runtime.hermes.respond_to_message(message,content)
+                except (ValueError,PolicyDenied) as exc:
+                    await send_chunked_reply(message,str(exc))
+                except Exception:
+                    log_exception_with_context('Conversation reply failed',**message_log_context(message))
+                    await send_chunked_reply(message,'Something went wrong. Try me again in a moment.')
+                finally:
+                    runtime.request_guard.release(user_id=message.author.id)
+                return
             admitted, reason = runtime.request_guard.acquire(
                 user_id=message.author.id, guild_id=getattr(message.guild, "id", None), prompt=content,
             )
@@ -249,8 +292,12 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 await send_chunked_reply(message, reason or "Please try again shortly.",
                                          max_len=config.max_discord_message_chars)
                 return
+            if router:
+                router.remember(message, address_reason)
             try:
-                async with asyncio.timeout(config.agent.request_timeout_seconds):
+                # Outer slack over the model deadline, so a slow round is reported by
+                # call_chat's own timeout instead of as an internal error here.
+                async with asyncio.timeout(config.agent.request_timeout_seconds + 15):
                     mention_images, image_error = await resolve_mention_images(
                         message,
                         image_limit=config.mention_image_limit,
