@@ -673,6 +673,10 @@ class HermesGateway:
         except asyncio.TimeoutError:
             raise web.HTTPTooManyRequests(text='Only one model request per task may run at once') from None
         try:
+            # A queued retry may outlive its user's role or a task cancellation.
+            current, _ = await self.authenticate(request)
+            if current is not cap:
+                raise web.HTTPForbidden(text='Task capability was revoked')
             return await self._forward_model(body, cap)
         finally:
             cap.lock.release()
@@ -767,24 +771,42 @@ class HermesGateway:
 
     async def package(self, request):
         """Broker one exact pinned dependency: raw verified bytes, never model context."""
-        body = await asyncio.wait_for(request.json(), 10)
         cap, _p = await self.authenticate(request)
-        remaining = cap.deadline - time.monotonic()
-        if remaining <= 10:
-            raise web.HTTPTooManyRequests(text='Task deadline is too close for a package fetch')
-        if cap.package_bytes >= PACKAGE_TASK_BYTES:
-            raise web.HTTPTooManyRequests(text='Task dependency byte quota exhausted')
+        body = await asyncio.wait_for(request.json(), 10)
         started = time.monotonic()
         outcome = 'failed'
         try:
             if not isinstance(body, dict) or set(body) != {'registry', 'name', 'version'}:
                 raise PackageError('invalid_request', 'Expected registry, name and version')
-            # The broker revalidates the request shape; quota leaves room only for bytes
-            # this task has not already fetched.
-            acquired = await asyncio.wait_for(
-                self.packages.serve(body, quota=PACKAGE_TASK_BYTES - cap.package_bytes),
-                timeout=min(25, remaining - 8))
-            cap.package_bytes += len(acquired.data)
+            remaining = cap.deadline - time.monotonic()
+            if remaining <= 10:
+                raise web.HTTPTooManyRequests(text='Task deadline is too close for a package fetch')
+            # The same per-task lock used for model calls makes the byte quota
+            # atomic across concurrent package requests from one worker.
+            try:
+                await asyncio.wait_for(cap.lock.acquire(),
+                                       min(MODEL_LOCK_WAIT_SECONDS, remaining - 10))
+            except asyncio.TimeoutError:
+                raise web.HTTPTooManyRequests(text='Task package turn is still busy') from None
+            try:
+                current, _p = await self.authenticate(request)
+                if current is not cap:
+                    raise web.HTTPForbidden(text='Task capability was revoked')
+                remaining = cap.deadline - time.monotonic()
+                if remaining <= 10:
+                    raise web.HTTPTooManyRequests(text='Task deadline is too close for a package fetch')
+                if cap.package_bytes >= PACKAGE_TASK_BYTES:
+                    raise web.HTTPTooManyRequests(text='Task dependency byte quota exhausted')
+                # The broker revalidates request shape and the remaining quota.
+                acquired = await asyncio.wait_for(
+                    self.packages.serve(body, quota=PACKAGE_TASK_BYTES - cap.package_bytes),
+                    timeout=min(25, remaining - 8))
+                current, _p = await self.authenticate(request)
+                if current is not cap:
+                    raise web.HTTPForbidden(text='Task capability was revoked')
+                cap.package_bytes += len(acquired.data)
+            finally:
+                cap.lock.release()
             outcome = 'ok'
             headers = {'X-Peterbot-Sha256': acquired.sha256,
                        'X-Peterbot-Filename': acquired.filename,

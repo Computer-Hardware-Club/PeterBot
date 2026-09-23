@@ -4,8 +4,11 @@ Design and operator recipe. On September 23 the dedicated `peterbot-worker`
 domain and `virbr-ctl` network were provisioned on P910. The unrelated desktop
 VM was left running. The guest runner is healthy at `192.168.241.2:8780`; the
 existing P910 gateway container reached its health endpoint. A disposable
-worker compiled and ran the pinned Rust fixture and passed 29 checks before
-and after a guest reboot. The broker capability probe was a declared skip
+worker compiled and ran the pinned Rust fixture and passed 30 checks after
+a guest reboot. The final image also passed six offline wheel/crate cache checks
+inside the VM. The setup-only NAT vNIC was detached from the live and persistent
+domain; the guest rebooted with only the host-only control link, and both
+worker smokes passed again. The broker capability probe was a declared skip
 because the final gateway overlay is not yet deployed. Production still uses
 the earlier gateway and host runner images. The recipe remains the recovery
 path for the pinned Debian generic-cloud `20260909-2596` and Rust `2026-09-03`
@@ -203,6 +206,11 @@ runtime uid) plus `virbr-ctl`.
      included — `--gateway-host` proves the full DNAT→P910→container path), and
      proves the runner is unreachable from the worker. A SKIP only exits 0 with
      `--expect-no-gateway` explicitly declared; otherwise it fails the run.
+   - package cache proof on the final VM image (same restricted `worker_args`,
+     one disposable worker, no broker needed yet):
+     `python3 deploy/smoke_package_worker.py --image peterbot-hermes-worker:REV`.
+     It installs and imports a pinned wheel offline, builds and runs a pinned
+     Rust crate offline, checks the cache is read-only, and cleans up the worker.
    - isolation sweep from the gateway container's network (env-only):
      `PETERBOT_ISOLATION_GATEWAY_HOST=192.168.240.2`,
      `PETERBOT_ISOLATION_RUNNER_HOST=192.168.241.2`,

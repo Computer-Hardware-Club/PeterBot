@@ -33,13 +33,14 @@ for image in "$@"; do
 done
 echo "transfer complete; verify with: ssh -i $PETERBOT_VM_KEY $PETERBOT_VM_SSH docker images"
 
-# Smoke dependencies: the end-to-end smoke (deploy/smoke_rust_worker.py) runs IN
-# the guest against the guest-local socket and needs these repo files present at
+# Smoke dependencies: Rust and package smokes run IN the guest against the
+# guest-local socket and need these repo files present at
 # /opt/peterbot. Push the exact subset (trusted operator channel, same as images).
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 tar -C "$repo" -czf /var/tmp/peterbot-smoke-src.tgz \
   peterbot/__init__.py peterbot/sandbox_runner.py \
-  deploy/smoke_rust_worker.py deploy/check_hermes_isolation.py \
+  deploy/smoke_rust_worker.py deploy/smoke_package_worker.py \
+  deploy/check_hermes_isolation.py \
   tests/fixtures/edigits tests/test_hermes_runtime_integration.py
 guest_ssh 'mkdir -p /opt/peterbot && tar -xz -C /opt/peterbot' < /var/tmp/peterbot-smoke-src.tgz
 rm -f /var/tmp/peterbot-smoke-src.tgz

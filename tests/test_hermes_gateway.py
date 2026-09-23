@@ -405,6 +405,25 @@ def test_a_wedged_model_lock_still_refuses_rather_than_queueing_forever(tmp_path
     asyncio.run(scenario())
 
 
+def test_model_wait_rechecks_cancellation_before_upstream_call(tmp_path):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cap = capability(gateway)
+            await cap.lock.acquire()
+            pending = asyncio.create_task(client.post(
+                "/v1/chat/completions", headers=headers(),
+                json={"messages": [{"role": "user", "content": "hi"}]}))
+            try:
+                await asyncio.sleep(0.03)
+                gateway.jobs.update(cap.job["id"], status="cancelled")
+            finally:
+                cap.lock.release()
+            response = await pending
+            assert response.status == 403
+            assert gateway.session.calls == []
+    asyncio.run(scenario())
+
+
 def test_model_and_tool_budgets_stop_dispatch_before_upstream_calls(tmp_path):
     async def scenario():
         async with gateway_client(tmp_path) as (gateway, client):
