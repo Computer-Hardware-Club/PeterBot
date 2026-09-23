@@ -2,16 +2,36 @@
 
 Discord bot with:
 - mention-based chat replies
+- bounded tool calls for web search, public webpages, and arithmetic
 - `/ask`, `/recap`, `/suggest`, and `/remindme` slash commands
 - reminder persistence across restarts
 - optional club knowledge and channel tone profiles
-- Docker-first deployment with `llama.cpp`
+- Docker deployment with a remote vLLM server or local `llama.cpp`
 - structured logging with user-facing debug IDs
 
 ## Runtime Model
 
-PeterBot now uses the `llama.cpp` HTTP server through its OpenAI-compatible chat API.
-Mention image support requires a multimodal `llama.cpp` model. Text-only models will still answer normal text mentions, but they cannot analyze attached images.
+PeterBot uses an OpenAI-compatible chat API. The remote deployment supports vLLM with structured tool calling. The model chooses from a fixed tool allowlist; application code validates and executes each call. Image mentions require a multimodal backend; set `agent.vision_enabled` to false for text-only deployments.
+
+## Remote model and tools
+
+Use `docker compose -f compose.remote.yml up --build -d` for the bot-only deployment. First set `inference.base_url`, `inference.model`, and `agent.search_base_url` in your deployment configuration. Loopback values in the repository are examples and must be replaced with endpoints reachable **from the bot container**. Keep production addresses and secrets in an external configuration/Compose environment, outside Git. Mount the production configuration at `/app/config.json`.
+
+Set `agent.allowed_guild_ids` to your club's Discord server ID before starting the bot. An empty list permits any guild the bot has joined; DMs remain disabled by default. vLLM must support automatic structured tool calls and the served model's tool parser. The default request disables thinking using `chat_template_kwargs.enable_thinking` and requests one completion.
+
+Peter's tools are:
+
+- `web_search`: SearXNG search results with snippets and source URLs. Search failures and partial results are reported. Queries go to public search providers.
+- `fetch_public_page`: reads public HTML or text pages, including the club website. It verifies DNS answers and each redirect, connects only to public IPs, and rejects private/local/Tailscale/metadata addresses, credentials and non-web ports. It does not render JavaScript or fetch linked assets. Firecrawl is not connected in this first version.
+- `calculate`: bounded arithmetic, including powers, with no Python execution or imports.
+
+The default agent budget is two tool rounds, four tool calls, at most three model requests and 3,072 allocated output tokens per answer. A 60-second deadline covers request handling. Admission limits are one active request globally, one per user, three requests per user per minute and fifteen per guild per minute. Oversized requests are rejected, outputs are capped, and generated Discord mentions are suppressed. `/recap` shares admission limits but does not use external tools.
+
+There are no model tools for shell access, files, credentials, Discord administration or server changes. Existing explicit `/remindme` and `/suggest` commands remain separate from model tools. Tool-capable rounds see the current question and attachments plus the static public persona. They never receive other members' channel history, author identity or dynamic reply context. Channel context returns only in the final stage, where further tools are disabled and any attempted tool call is rejected. Keep the static persona public. No cross-channel search or durable chat memory is added. Output suppresses automatic link previews as well as mentions.
+
+Web content remains untrusted: prompt instructions help guide behavior, but the tool/network limits are enforced by code. Prompt injection can still affect answer quality; source links are not an endorsement of accuracy. Current questions and attachments are input to tool planning, so users should not include secrets. Rate limits are process-local, reset on restart, and assume a single bot process. An administrator controls configured service endpoints; use private networking and existing service authentication where available. `LLAMA_CPP_API_KEY` is also supported for vLLM and is never sent by the separate web-tool sessions.
+
+References: [vLLM tool calling](https://docs.vllm.ai/en/stable/features/tool_calling/) and [SearXNG search API](https://docs.searxng.org/dev/search_api.html).
 
 Supported deployment modes:
 - default `docker compose` flow: one bot image that also includes `llama-server`
@@ -33,6 +53,7 @@ Sections:
 - `paths`: persistent data, optional knowledge/profile files, log file
 - `logging`: log level and debug-id behavior
 - `behavior`: message/context limits and reminder retry tuning
+- `agent`: tools, request budgets, quotas, guild access and image capability
 
 Relative paths in `config.json` resolve from the config file directory.
 

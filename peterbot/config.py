@@ -24,7 +24,7 @@ You are Peter, the official AI assistant for the Computer Hardware Club at Orego
 
 ### **Your Identity:**
 - **Your name is Peter.**
-- You are an AI powered by the Gemma 4 E4B language model.
+- You are an AI assistant. The configured model powers your responses.
 - You share your name with the club's Dell PowerEdge R620 server. You can mention this as a fun fact when relevant, but dont share when completely irrelevant.
 
 ### **Core Knowledge Base:**
@@ -317,6 +317,24 @@ class BehaviorConfig:
 
 
 @dataclass(frozen=True)
+class AgentConfig:
+    enabled: bool = False
+    search_base_url: str = ""
+    max_tool_rounds: int = 2
+    max_tool_calls: int = 4
+    max_total_tokens: int = 3072
+    request_timeout_seconds: int = 60
+    max_response_chars: int = 6000
+    max_prompt_chars: int = 4000
+    max_concurrent: int = 1
+    user_requests_per_minute: int = 3
+    guild_requests_per_minute: int = 15
+    allowed_guild_ids: tuple[int, ...] = ()
+    allow_dms: bool = False
+    vision_enabled: bool = True
+
+
+@dataclass(frozen=True)
 class AppConfig:
     discord_token: Optional[str]
     llama_cpp_api_key: Optional[str]
@@ -328,6 +346,7 @@ class AppConfig:
     logging: LoggingConfig
     behavior: BehaviorConfig
     config_path: str
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
     @classmethod
     def load(cls, config_file: Optional[str] = None) -> "AppConfig":
@@ -343,6 +362,17 @@ class AppConfig:
         paths_section = _expect_section(raw, "paths")
         logging_section = _expect_section(raw, "logging")
         behavior_section = _expect_section(raw, "behavior")
+        agent_section = _expect_section(raw, "agent")
+        guild_ids = agent_section.get("allowed_guild_ids", [])
+        if not isinstance(guild_ids, list) or any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in guild_ids
+        ):
+            raise ValueError("agent.allowed_guild_ids must be a list of positive integer IDs")
+        agent_values = {}
+        for name in ("max_tool_rounds", "max_tool_calls", "max_total_tokens", "request_timeout_seconds",
+                     "max_response_chars", "max_prompt_chars", "max_concurrent",
+                     "user_requests_per_minute", "guild_requests_per_minute"):
+            agent_values[name] = _int_or_default(agent_section, name, getattr(AgentConfig(), name), minimum=1)
 
         model_name = _require_str(inference_section, "model")
         persona = PersonaConfig(
@@ -484,6 +514,14 @@ class AppConfig:
                 ),
             ),
             config_path=str(config_path),
+            agent=AgentConfig(
+                **agent_values,
+                enabled=_bool_or_default(agent_section, "enabled", False),
+                search_base_url=_str_or_default(agent_section, "search_base_url", ""),
+                allowed_guild_ids=tuple(guild_ids),
+                allow_dms=_bool_or_default(agent_section, "allow_dms", False),
+                vision_enabled=_bool_or_default(agent_section, "vision_enabled", True),
+            ),
         )
         config.validate()
         return config
@@ -495,6 +533,17 @@ class AppConfig:
     def validate(self) -> None:
         if not self.discord_token:
             raise ValueError("DISCORD_TOKEN is not set. Add it to .env.")
+
+        if self.agent.enabled:
+            _normalize_base_url(self.agent.search_base_url)
+            for name, maximum in (("max_tool_rounds", 4), ("max_tool_calls", 8),
+                                  ("max_total_tokens", 8192), ("request_timeout_seconds", 120),
+                                  ("max_response_chars", 12000), ("max_prompt_chars", 8000),
+                                  ("max_concurrent", 2), ("user_requests_per_minute", 10),
+                                  ("guild_requests_per_minute", 60)):
+                value = getattr(self.agent, name)
+                if type(value) is not int or not 1 <= value <= maximum:
+                    raise ValueError(f"agent.{name} must be between 1 and {maximum}")
 
         if not self.inference.model.strip():
             raise ValueError("inference.model must not be empty")
