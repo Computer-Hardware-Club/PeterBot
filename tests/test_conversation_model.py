@@ -501,9 +501,10 @@ def test_officer_correction_is_accepted_against_runtime_config_not_priors():
     assert corrected == "You're right, I run qwen not Claude."
 
 
-def test_runtime_identity_memory_correction_does_not_write_a_stale_club_fact():
+@pytest.mark.parametrize('word', ['that', 'the'])
+def test_runtime_identity_memory_correction_does_not_write_a_stale_club_fact(word):
     result, calls = run({'content': "Nah, I'm Claude."},
-                        'the model that powers you is Qwen3.8 Flash Next. remember that')
+                        f'the model {word} powers you is Qwen3.8 Flash Next. remember that')
     assert result == 'qwen under the hood'
     assert calls == []
 

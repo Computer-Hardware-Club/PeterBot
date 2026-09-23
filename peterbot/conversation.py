@@ -169,7 +169,7 @@ MEMORY_RECALL_QUESTION_RE = re.compile(
 MODEL_IDENTITY_RE = re.compile(
     r'\b(?:what|which)\s+(?:model|llm|ai|brain)\s+(?:are|is|do|does|runs?|powers?|drives?)\s+you\b'
     r'|\b(?:what|which)\s+(?:model|llm|ai)\s+do\s+you\s+(?:run|use)\b'
-    r'|\b(?:the|your)\s+(?:model|llm)\s+(?:that\s+)?(?:runs|powers|drives)\s+you\b'
+    r'|\b(?:the|your)\s+(?:model|llm)\s+(?:(?:that|the)\s+)?(?:runs|powers|drives)\s+you\b'
     r'|\b(?:are|is)\s+you\s+(?:built\s+on|powered\s+by)\b'
     r"|\byou\s+(?:'r'?|re|are)\s+(?:powered\s+by|built\s+on)\b"
     r"|\bwhat(?:'s| is)?\s+(?:actually\s+)?under the hood\b",
