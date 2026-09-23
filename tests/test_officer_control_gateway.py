@@ -63,8 +63,9 @@ def make(tmp_path):
     guild = Guild()
     control = Channel(guild, 20, private=True)
     general = Channel(guild, 21, private=False)
+    testing = Channel(guild, 22, private=True)
     destination = Channel(guild, 30, private=False)
-    channels = {20: control, 21: general, 30: destination}
+    channels = {20: control, 21: general, 22: testing, 30: destination}
     bot = SimpleNamespace(user=SimpleNamespace(id=99), http=HTTP(),
         get_guild=lambda guild_id: guild if guild_id == 10 else None,
         fetch_channel=AsyncMock(side_effect=lambda channel_id: channels[channel_id]))
@@ -74,7 +75,7 @@ def make(tmp_path):
     settings = HermesSettings(allowed_guild_ids=frozenset({10}), officer_role_ids=frozenset({100}),
         owner_user_ids=frozenset({1}), runner_url='http://runner:8780',
         tool_service_url='http://gateway:8770', runner_token='r' * 40,
-        state_dir=str(tmp_path), control_channel_ids=frozenset({20}),
+        state_dir=str(tmp_path), control_channel_ids=frozenset({20, 22}),
         announcement_destination_ids=frozenset({30}))
     return HermesGateway(bot, config, settings), guild, channels, bot
 
@@ -131,6 +132,26 @@ def test_public_or_nonofficer_source_cannot_mutate_or_fall_through(tmp_path):
                 await gateway.handle_control_message(source, source.content)
         assert gateway.club.current(10)['version'] == 0
         assert gateway.outbox.pending() == []
+        await gateway.close()
+
+    asyncio.run(scenario())
+
+
+def test_officer_can_change_and_undo_a_fact_in_private_testing(tmp_path):
+    gateway, guild, channels, _bot = make(tmp_path)
+
+    async def scenario():
+        request = message(guild, channels[22],
+                          'set public club fact release_test_room to TEST ONLY 123', source=540)
+        assert await gateway.handle_control_message(request, request.content)
+        assert gateway.club.public_facts(10)[0]['value'] == 'TEST ONLY 123'
+        denied = message(guild, channels[22],
+                         'set public club fact release_test_room to WRONG', user_id=2, source=541)
+        with pytest.raises(PolicyDenied):
+            await gateway.handle_control_message(denied, denied.content)
+        undo = message(guild, channels[22], 'undo last club fact', source=542)
+        assert await gateway.handle_control_message(undo, undo.content)
+        assert gateway.club.public_facts(10) == ()
         await gateway.close()
 
     asyncio.run(scenario())
