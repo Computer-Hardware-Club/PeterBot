@@ -17,8 +17,15 @@ import stat
 import tempfile
 
 
-DATABASE_SUFFIXES = (".sqlite3", ".db")
+DATABASE_SUFFIXES = (".sqlite3", ".db", ".sqlite")
 TRANSIENT_SUFFIXES = ("-wal", "-shm", "-journal")
+
+# Project manifests are a SQLite database whose `files` table names
+# content-addressed blobs under `projects/blobs/`. An interrupted store-side
+# GC can leave a live (consistent) manifest pointing at bytes that no longer
+# exist, so the snapshot must be cross-checked, not just self-checked.
+PROJECT_MANIFEST = "projects/projects.sqlite"
+PROJECT_BLOB_DIR = "projects/blobs"
 
 
 def _digest(path: Path) -> tuple[int, str]:
@@ -140,7 +147,28 @@ def verify(snapshot: Path) -> list[dict]:
         actual.add(path.relative_to(snapshot / "files").as_posix())
     if actual != seen:
         raise ValueError("Snapshot has unexpected or missing files")
+    _check_project_blobs(snapshot, entries)
     return entries
+
+
+def _check_project_blobs(snapshot: Path, entries: list[dict]) -> None:
+    """Fail if the snapshotted project manifest references a blob the snapshot
+    does not contain byte-for-byte. Missing entries are verified first, so
+    this comparison reuses their digests instead of re-hashing the tree."""
+    indexed = {entry["path"]: entry for entry in entries}
+    manifests = [entry["path"] for entry in entries if entry["kind"] == "sqlite"
+                 and (entry["path"] == PROJECT_MANIFEST
+                      or entry["path"].endswith("/" + PROJECT_MANIFEST))]
+    for name in manifests:
+        prefix = name[:-len(PROJECT_MANIFEST)]
+        manifest = snapshot / "files" / _safe_name(name)
+        with closing(sqlite3.connect(manifest.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
+            rows = db.execute("SELECT DISTINCT sha256, size FROM files").fetchall()
+        for digest, size in rows:
+            entry = indexed.get(f"{prefix}{PROJECT_BLOB_DIR}/{digest[:2]}/{digest}")
+            if entry is None or entry["sha256"] != digest or entry["bytes"] != size:
+                raise ValueError(
+                    f"Snapshot project manifest references a missing or mismatched blob: {digest}")
 
 
 def restore(snapshot: Path, destination: Path) -> None:

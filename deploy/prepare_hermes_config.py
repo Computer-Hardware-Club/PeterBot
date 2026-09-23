@@ -17,6 +17,8 @@ INFERENCE_MAX_TOKENS = 4096
 AGENT_MAX_TOTAL_TOKENS = 8192
 AGENT_REQUEST_TIMEOUT_SECONDS = 240
 AGENT_MAX_CONCURRENT = 2
+AGENT_USER_REQUESTS_PER_MINUTE = 20
+AGENT_GUILD_REQUESTS_PER_MINUTE = 120
 
 
 def prepare(source: Path, output: Path, persona: Path, container_root: Path = Path('/app')) -> None:
@@ -28,7 +30,9 @@ def prepare(source: Path, output: Path, persona: Path, container_root: Path = Pa
     inference['max_tokens']=INFERENCE_MAX_TOKENS
     inference['timeout_seconds']=INFERENCE_TIMEOUT_SECONDS
     config.setdefault('agent',{}).update(max_total_tokens=AGENT_MAX_TOTAL_TOKENS,
-        request_timeout_seconds=AGENT_REQUEST_TIMEOUT_SECONDS,max_concurrent=AGENT_MAX_CONCURRENT)
+        request_timeout_seconds=AGENT_REQUEST_TIMEOUT_SECONDS,max_concurrent=AGENT_MAX_CONCURRENT,
+        user_requests_per_minute=AGENT_USER_REQUESTS_PER_MINUTE,
+        guild_requests_per_minute=AGENT_GUILD_REQUESTS_PER_MINUTE)
     paths=config.setdefault('paths',{})
     for key in ('knowledge_file','channel_profiles_file'):
         raw=paths.get(key)

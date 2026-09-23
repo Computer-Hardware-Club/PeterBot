@@ -21,7 +21,8 @@ class AwarenessRouter:
         self.seen = set()
         self.seen_order = deque(maxlen=4096)
         escaped = re.escape(name)
-        self.name = re.compile(rf"^(?:(?:hey|hi|hello|yo|okay|ok|thanks|thank you)\s+)?{escaped}\b(?:[\s,!:?]+|$)", re.I)
+        self.name = re.compile(rf"^(?:(?:hey|hi|hello|yo|okay|ok|thanks|thank you)[,\s]+)?{escaped}\b(?:[\s,!:?]+|$)", re.I)
+        self.trailing_name = re.compile(rf"\n\s*{escaped}[,.!?]?\s*$", re.I)
         self.third_person = re.compile(rf"^{escaped}\s+(?:said|says|was|is|has|had|did|does|went|sent|wrote|told)\b", re.I)
 
     def _key(self, message):
@@ -63,8 +64,18 @@ class AwarenessRouter:
                     target = None
             if getattr(getattr(target, "author", None), "id", None) == self.bot_user_id:
                 return "reply"
-        if self.name.match(content) and not self.third_person.match(content):
+        if (self.name.match(content) and not self.third_person.match(content)) or self.trailing_name.search(content):
             return "name"
+        # The owner's private task thread is itself the addressing context:
+        # a natural follow-up there continues that task even after the lease
+        # expired and without a name or reply. Only the bot-created private
+        # thread qualifies; the job lookup downstream is owner-bound, so a
+        # member of someone else's thread still reaches no session.
+        channel = getattr(message, "channel", None)
+        is_private = getattr(channel, "is_private", None)
+        if callable(is_private) and is_private() \
+                and getattr(channel, "owner_id", None) == self.bot_user_id:
+            return "thread"
         key = self._key(message)
         if self.leases.get(key, 0) <= self.clock():
             self.leases.pop(key, None)
@@ -72,7 +83,15 @@ class AwarenessRouter:
         if re.match(r"^(?:bye|goodbye|never\s?mind|stop|ignore that)\b", content, re.I):
             self.leases.pop(key, None)
             return None
-        if re.match(r"^(?:@?\w+[,:]\s+|<@!?\d+>)", content):
+        if re.match(r"^(?:@\w+[,:]?\s+|<@!?\d+>)", content):
+            self.leases.pop(key, None)
+            return None
+        # A discourse marker such as "nah," is not another person's name.
+        # Only abandon the conversation for a plain name when Discord can
+        # resolve it to an actual member of this guild.
+        other = re.match(r"^([\w.'-]+)[,:]\s+", content)
+        lookup = getattr(message.guild, "get_member_named", None)
+        if other and callable(lookup) and lookup(other.group(1)) is not None:
             self.leases.pop(key, None)
             return None
         return "followup"
@@ -86,5 +105,5 @@ class AwarenessRouter:
                 self.seen.discard(self.seen_order.popleft())
             self.seen_order.append(message_id)
             self.seen.add(message_id)
-        if reason in {"mention", "name", "reply"}:
+        if reason in {"mention", "name", "reply", "followup"}:
             self.leases[self._key(message)] = self.clock() + self.lease_seconds

@@ -77,17 +77,21 @@ def test_ask_defers_before_normal_chat_and_never_creates_a_task(setup_handlers):
     bot, runtime = setup_handlers
     from test_command_admission import interaction as chat_interaction
     request = chat_interaction()
-    runtime.hermes = SimpleNamespace(eligible=AsyncMock(), submit=AsyncMock())
+    runtime.hermes = SimpleNamespace(
+        eligible=AsyncMock(), principal=AsyncMock(return_value=Principal(10, 1, 20, (100,))),
+        conversational_reply=AsyncMock(), conversations=SimpleNamespace(append_turn=Mock()),
+        submit=AsyncMock())
 
-    async def chat(**kwargs):
+    async def chat(*args, **kwargs):
         request.response.defer.assert_awaited_once_with(ephemeral=True)
         return "Just chatting."
 
-    runtime.llm_client.call_chat.side_effect = chat
+    runtime.hermes.conversational_reply.side_effect = chat
     asyncio.run(bot.tree.callbacks["ask"](request, "Tell me a joke"))
     runtime.hermes.eligible.assert_not_awaited()
     runtime.hermes.submit.assert_not_awaited()
-    runtime.llm_client.call_chat.assert_awaited_once()
+    runtime.hermes.conversational_reply.assert_awaited_once()
+    runtime.llm_client.call_chat.assert_not_awaited()
 
 
 def task_channels(gateway):

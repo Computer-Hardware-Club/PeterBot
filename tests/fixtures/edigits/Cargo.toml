@@ -1,0 +1,10 @@
+# Dependency-free by design: the Peter worker sandbox is offline
+# (CARGO_NET_OFFLINE=true, no registry access until PETER-13), so this fixture
+# must build from rust-std alone to prove the pinned toolchain end to end.
+[package]
+name = "edigits"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 2

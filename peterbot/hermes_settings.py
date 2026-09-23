@@ -18,9 +18,11 @@ class HermesSettings:
     runner_token: str
     state_dir: str
     officer_only: bool = True
+    member_work_enabled: bool = False
     listen_channel_ids: frozenset[int] = frozenset()
     control_channel_ids: frozenset[int] = frozenset()
-    conversation_lease_seconds: int = 120
+    announcement_destination_ids: frozenset[int] = frozenset()
+    conversation_lease_seconds: int = 300
     max_iterations: int = 30
     max_tokens: int = 8192
     max_model_calls: int = 40
@@ -58,18 +60,21 @@ class HermesSettings:
         officer_only = raw.get('officer_only', True)
         if type(officer_only) is not bool:
             raise ValueError('officer_only must be a boolean')
+        member_work_enabled = raw.get('member_work_enabled', False)
+        if type(member_work_enabled) is not bool:
+            raise ValueError('member_work_enabled must be a boolean')
         state_dir = raw.get('state_dir','/app/peterbot-data/hermes')
         if not isinstance(state_dir, str) or not state_dir or not Path(state_dir).is_absolute():
             raise ValueError('state_dir must be an absolute path')
         if officer_only and not ids['officer_role_ids']:
             raise ValueError('Officer pilot requires officer_role_ids')
         channel_ids = {}
-        for key in ('listen_channel_ids', 'control_channel_ids'):
+        for key in ('listen_channel_ids', 'control_channel_ids', 'announcement_destination_ids'):
             values = raw.get(key, [])
             if not isinstance(values, list) or any(type(v) is not int or not 0 < v < 2**63 for v in values):
                 raise ValueError(f'{key} must contain positive integer IDs')
             channel_ids[key] = frozenset(values)
-        lease_seconds = raw.get('conversation_lease_seconds', 120)
+        lease_seconds = raw.get('conversation_lease_seconds', 300)
         if type(lease_seconds) is not int or not 30 <= lease_seconds <= 600:
             raise ValueError('Invalid conversation_lease_seconds')
         limits = {}
@@ -78,5 +83,6 @@ class HermesSettings:
             if type(value) is not int or not minimum <= value <= maximum:
                 raise ValueError(f'Invalid {key}')
             limits[key] = value
-        return cls(**ids, **urls, runner_token=token, state_dir=state_dir,officer_only=officer_only,
+        return cls(**ids, **urls, runner_token=token, state_dir=state_dir,
+                   officer_only=officer_only, member_work_enabled=member_work_enabled,
                    **channel_ids, conversation_lease_seconds=lease_seconds, **limits)

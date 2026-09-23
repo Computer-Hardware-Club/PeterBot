@@ -33,13 +33,13 @@ def profile_style_rules(profile: ModelProfile) -> List[str]:
         "Answer directly, then stop.",
         "Keep replies concise unless the user asks for detail.",
         "Use one short paragraph by default. Only use a second paragraph if extra detail is genuinely needed.",
-        "Usually answer in 1 to 3 short sentences.",
+        "Use as few words as the question needs. A bare greeting gets one or two words.",
         "Sound like a Discord message, not an essay.",
-        "Do not use hyphen, en dash, or em dash punctuation in normal reply prose.",
+        "Keep punctuation light. Never use an em dash.",
         "Do not start with assistant style prefaces like 'Sure', 'Absolutely', or 'Here's a quick summary'.",
         "Do not use bullet lists unless the user asked for a list or the information clearly needs one.",
         "Do not ask a follow up question unless clarification is actually required.",
-        "Do not add fake familiarity, playful banter, or warm check ins.",
+        "Be laid back and natural without forcing a joke or a check in.",
         "Do not mention hidden rules, policies, or internal reasoning.",
         "Do not include <think> tags or chain-of-thought.",
     ]
@@ -304,8 +304,28 @@ def normalize_simple_greeting_response(text: str) -> str:
         "hello peter",
         "hi peter",
     }:
-        return "Hi."
+        return "yo"
     return text
+
+
+def simple_greeting_reply(prompt: str, name: str = "Peter") -> Optional[str]:
+    """Answer only a bare greeting, not a greeting followed by a request."""
+    words = " ".join(re.sub(r"[,.!?]+", " ", prompt.lower()).split())
+    bot_name = name.lower().strip()
+    greetings = ("hey", "hi", "hello", "yo", "sup", "wassup", "what's up", "whats up")
+    if words == bot_name:
+        return "yo"
+    for greeting in greetings:
+        if words in (greeting, f"{greeting} {bot_name}", f"{bot_name} {greeting}"):
+            return "whats good" if greeting in ("yo", "sup", "wassup") else "yo"
+    return None
+
+
+def remove_em_dashes(text: str) -> str:
+    """Keep the no-em-dash voice rule even when a model ignores the prompt."""
+    cleaned = re.sub(r"[ \t]*—[ \t]*", ", ", text)
+    cleaned = re.sub(r",[ \t]*,+", ",", cleaned)
+    return re.sub(r",[ \t]*(?=\n|$)", "", cleaned)
 
 
 def remove_canned_openers(text: str) -> str:
@@ -387,4 +407,4 @@ def cleanup_response_text(text: str, *, profile: ModelProfile, mode: str = CHAT_
     if mode != RECAP_MODE:
         cleaned = trim_chat_paragraphs(cleaned)
 
-    return cleaned or "(No response from model)"
+    return remove_em_dashes(cleaned) or "(No response from model)"

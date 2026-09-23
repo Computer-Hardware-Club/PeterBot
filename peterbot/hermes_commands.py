@@ -36,7 +36,7 @@ def register_agent_commands(bot, service):
         if not interaction.guild:
             return await safe_send_interaction_message(interaction,'Use this in the club server.')
         rows=service.jobs.list_owned(interaction.guild.id,interaction.user.id)
-        text='\n'.join(f"`{r['id']}` — {r['status']}" for r in rows) or 'You have no saved tasks.'
+        text='\n'.join(f"`{r['id']}`: {r['status']}" for r in rows) or 'No saved tasks.'
         await safe_send_interaction_message(interaction,text)
 
     @bot.tree.command(name='cancel_task',description='Stop one of your queued or running Peter tasks')
@@ -46,7 +46,8 @@ def register_agent_commands(bot, service):
             if not interaction.guild:
                 raise ValueError('Use this in the club server.')
             await service.cancel(task_id,interaction.guild.id,interaction.user.id)
-            await safe_send_interaction_message(interaction,'Task cancelled.')
+            await safe_send_interaction_message(interaction,
+                "cancel requested. i'll keep any valid files")
         except (ValueError, PolicyDenied) as exc:
             await safe_send_interaction_message(interaction,str(exc))
 

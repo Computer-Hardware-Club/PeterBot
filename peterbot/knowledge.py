@@ -4,9 +4,53 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from datetime import date
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from .logging_utils import log_exception_with_context
+# --- Static/provenance rules used by the live club-fact snapshot (PETER-10) ---
+# A static chunk may declare an ISO expiry directive on its own line:
+#   expires: 2026-05-01
+# Chunks past expiry are never offered to a model. Headings slug-match live
+# fact keys so a committed fact supersedes the older file text it replaces.
+CHUNK_EXPIRES = re.compile(
+    r"^\s*expires(?:_at)?\s*[:=]\s*(\d{4}-\d{2}-\d{2})\s*$", re.IGNORECASE | re.MULTILINE)
+HEADING_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def heading_slug(heading: str) -> str:
+    return HEADING_SPLIT.sub("_", (heading or "").casefold()).strip("_")
+
+
+def chunk_is_expired(chunk: Any, today: date) -> bool:
+    """True when the chunk declares an ``expires: YYYY-MM-DD`` date already past."""
+    match = CHUNK_EXPIRES.search(getattr(chunk, "body", "") or "")
+    if match is None:
+        return False
+    try:
+        expiry = date.fromisoformat(match.group(1))
+    except ValueError:
+        return False
+    return expiry < today
+
+
+def chunk_is_superseded(chunk: Any, live_keys: set[str],
+                        alias_headings: Mapping[str, frozenset[str]] | None = None) -> bool:
+    """True when a committed live fact already states what this static chunk says.
+
+    ``live_keys`` are fact keys of current committed records. ``alias_headings``
+    maps a fact key to extra static heading slugs it supersedes (e.g. the
+    roster fact superseding an "Officers" heading).
+    """
+    slug = heading_slug(getattr(chunk, "heading", ""))
+    if not slug or not live_keys:
+        return False
+    if slug in live_keys:
+        return True
+    for fact_key, aliases in (alias_headings or {}).items():
+        if fact_key in live_keys and slug in aliases:
+            return True
+    return False
 
 
 def tokenize_relevance(text: str) -> List[str]:

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import discord
 
+from .prompts import remove_em_dashes
 from .logging_utils import (
     build_user_debug_message,
     interaction_log_context,
@@ -23,7 +24,7 @@ def split_for_discord(text: str, max_len: int = 1800) -> List[str]:
     if not text:
         return ["(No response)"]
 
-    remaining = text.strip()
+    remaining = remove_em_dashes(text.strip())
     chunks: List[str] = []
     while remaining:
         if len(remaining) <= max_len:
@@ -99,6 +100,7 @@ async def safe_send_interaction_message(
     *,
     ephemeral: bool = True,
 ) -> bool:
+    text = remove_em_dashes(text)
     try:
         if interaction.response.is_done():
             await interaction.followup.send(text, ephemeral=ephemeral, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)

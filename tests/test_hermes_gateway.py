@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import hashlib
 import json
 import time
 from types import SimpleNamespace
@@ -12,8 +13,10 @@ import aiohttp
 import pytest
 
 from peterbot.agent_jobs import JobStore
-from peterbot.agent_policy import Principal
+from peterbot.agent_policy import PolicyDenied, Principal
 from peterbot.hermes_gateway import Capability, HermesGateway
+from peterbot import package_access
+from peterbot.package_access import PACKAGE_TASK_BYTES, PackageBroker, PackageError
 from peterbot.hermes_settings import HermesSettings
 
 
@@ -114,12 +117,15 @@ async def gateway_client(tmp_path, *, officer_only=True):
         owner_user_ids=frozenset({1}), runner_url="http://runner:8080",
         tool_service_url="http://gateway:8770", runner_token="r" * 40,
         state_dir=str(tmp_path), officer_only=officer_only,
+        member_work_enabled=not officer_only,
     )
     gateway = HermesGateway(bot, config, settings)
     gateway.session = UpstreamSession()
     gateway.test_members = members
     app = web.Application()
     app.router.add_post("/tool", gateway.tool)
+    app.router.add_post("/progress", gateway.progress)
+    app.router.add_post("/package", gateway.package)
     app.router.add_post("/v1/chat/completions", gateway.model)
     app.router.add_get("/v1/models", gateway.models)
     client = TestClient(TestServer(app))
@@ -228,6 +234,52 @@ def test_role_revocation_is_refreshed_for_each_request(tmp_path):
             assert (await client.get("/v1/models", headers=headers())).status == 200
             gateway.test_members[1].roles = []
             assert (await client.get("/v1/models", headers=headers())).status == 403
+
+    asyncio.run(scenario())
+
+
+def test_worker_progress_is_capability_bound_monotonic_and_fixed(tmp_path):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cap = capability(gateway)
+            payload = {'job_id': cap.job['id'], 'seq': 1, 'stage': 'researching'}
+            first = await client.post('/progress', headers=headers(), json=payload)
+            assert first.status == 200
+            assert gateway.jobs.get(cap.job['id'])['stage'] == 'researching'
+            assert (await client.post('/progress', headers=headers(), json=payload)).status == 409
+            assert (await client.post('/progress', headers=headers(),
+                json={**payload, 'job_id': 'another-job', 'seq': 2})).status == 403
+            assert (await client.post('/progress', headers=headers(),
+                json={**payload, 'stage': 'my private command', 'seq': 2})).status == 400
+            assert (await client.post('/progress', headers=headers('bad'), json=payload)).status == 401
+            gateway.test_members[1].roles = []
+            assert (await client.post('/progress', headers=headers(),
+                json={**payload, 'seq': 2, 'stage': 'running_code'})).status == 403
+
+    asyncio.run(scenario())
+
+
+def test_model_uses_actual_token_receipt_and_remaining_task_deadline(tmp_path):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cap = capability(gateway, deadline=time.monotonic() + 65)
+            gateway.session.result = {'choices': [{'message': {'content': 'Done'}}],
+                                      'usage': {'prompt_tokens': 12, 'completion_tokens': 20}}
+            body = {'messages': [{'role': 'user', 'content': 'hello'}], 'max_tokens': 100}
+            response = await client.post('/v1/chat/completions', headers=headers(), json=body)
+            assert response.status == 200
+            assert cap.output_tokens == 20  # unused reservation is returned
+            assert gateway.metrics.summary()['model']['input_tokens'] == 12
+            assert gateway.metrics.summary()['model']['output_tokens'] == 20
+            calls = len(gateway.session.calls)
+            cap.deadline = time.monotonic() + 20
+            response = await client.post('/v1/chat/completions', headers=headers(), json=body)
+            assert response.status == 429
+            assert len(gateway.session.calls) == calls  # no long call starts at the deadline
+            cap.deadline = time.monotonic() + 4
+            tool = await client.post('/tool', headers=headers(),
+                json={'tool': 'calculate', 'arguments': {'expression': '2+2'}})
+            assert tool.status == 429 and cap.tool_calls == 0
 
     asyncio.run(scenario())
 
@@ -350,6 +402,25 @@ def test_a_wedged_model_lock_still_refuses_rather_than_queueing_forever(tmp_path
             finally:
                 cap.lock.release()
 
+    asyncio.run(scenario())
+
+
+def test_model_wait_rechecks_cancellation_before_upstream_call(tmp_path):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cap = capability(gateway)
+            await cap.lock.acquire()
+            pending = asyncio.create_task(client.post(
+                "/v1/chat/completions", headers=headers(),
+                json={"messages": [{"role": "user", "content": "hi"}]}))
+            try:
+                await asyncio.sleep(0.03)
+                gateway.jobs.update(cap.job["id"], status="cancelled")
+            finally:
+                cap.lock.release()
+            response = await pending
+            assert response.status == 403
+            assert gateway.session.calls == []
     asyncio.run(scenario())
 
 
@@ -592,6 +663,70 @@ def test_submission_send_race_delivers_final_answer_once(tmp_path):
     asyncio.run(scenario())
 
 
+def test_private_task_status_message_becomes_final_answer(tmp_path):
+    async def scenario():
+        async with task_gateway(tmp_path) as gateway:
+            gateway.thread.released.set()
+            job = await gateway.submit(guild_id=10, user_id=1, channel=gateway.source,
+                source_message_id=333, prompt='Build a small CLI')
+            status = gateway.thread.messages[0]
+            assert gateway.jobs.get(job['id'])['status_message_id'] == status.id
+            gateway.thread.fetch_message = AsyncMock(return_value=status)
+            gateway.session.result = {'status': 'completed', 'answer': 'Built and tested.',
+                                      'artifacts': []}
+            await gateway.queue_tick()
+            while gateway.active:
+                await asyncio.sleep(0.01)
+            await gateway.queue_tick()
+            status.edit.assert_awaited()
+            assert status.edit.await_args.kwargs['content'] == 'Built and tested.'
+            assert 'Built and tested.' not in gateway.thread.sent
+            assert gateway.jobs.get(job['id'])['delivery_status'] == 'delivered'
+
+    asyncio.run(scenario())
+
+
+def test_private_followup_edits_its_status_instead_of_leaving_a_stale_notice(tmp_path):
+    async def scenario():
+        async with task_gateway(tmp_path) as gateway:
+            gateway.thread.released.set()
+            first = gateway.jobs.create(guild_id=10, user_id=1, channel_id=21,
+                source_message_id=330, prompt='Make counter.py')
+            gateway.jobs.update(first['id'], status='completed', answer='Printed 42.',
+                                delivered=True)
+            followup = await gateway.submit(guild_id=10, user_id=1,
+                channel=gateway.thread, source_message_id=331,
+                prompt='Change it to 43', parent_id=first['id'])
+            assert followup['status_message_id'] is None
+            gateway.thread.fetch_message = AsyncMock(
+                side_effect=lambda _id: gateway.thread.messages[0])
+            gateway.session.result = {'status': 'completed', 'answer': 'Updated counter.py.',
+                                      'artifacts': []}
+            await gateway.queue_tick()
+            while gateway.active:
+                await asyncio.sleep(0.01)
+            await gateway.queue_tick()
+            notice = gateway.thread.messages[0]
+            assert gateway.jobs.get(followup['id'])['status_message_id'] == notice.id
+            assert notice.edit.await_args.kwargs['content'] == 'Updated counter.py.'
+            assert 'Updated counter.py.' not in gateway.thread.sent
+            assert gateway.jobs.get(followup['id'])['delivery_status'] == 'delivered'
+    asyncio.run(scenario())
+
+
+def test_members_can_chat_before_work_execution_rollout_but_cannot_submit(tmp_path):
+    async def scenario():
+        async with task_gateway(tmp_path, officer_only=False) as gateway:
+            assert await gateway.eligible(10, 2, gateway.source.id)
+            with pytest.raises(PolicyDenied, match='not available to members'):
+                await gateway.submit(guild_id=10, user_id=2, channel=gateway.source,
+                                     source_message_id=301, prompt='Run code')
+            assert gateway.source.threads_created == 0
+            assert gateway.jobs.pending() == []
+
+    asyncio.run(scenario())
+
+
 def test_stale_pending_snapshot_cannot_double_start(tmp_path):
     async def scenario():
         async with task_gateway(tmp_path) as gateway:
@@ -825,5 +960,118 @@ def test_ambiguous_delivery_failure_freezes_for_reconciliation(tmp_path):
             await gateway.queue_tick()
             assert gateway.thread.sent == ["private result"]
             assert gateway.jobs.get(job["id"])["delivery_status"] == "delivered"
+
+    asyncio.run(scenario())
+
+
+WHEEL_BODY = b"PK\x03\x04fake wheel"
+WHEEL_DIGEST = hashlib.sha256(WHEEL_BODY).hexdigest()
+
+def image_cache(tmp_path, monkeypatch):
+    """Synthetic image cache holding the pinned six wheel under the task's control."""
+    cache = tmp_path / "deps"
+    (cache / "wheels").mkdir(parents=True)
+    entry = package_access.image_lookup("pypi", "six", "1.17.0")
+    (cache / "wheels" / entry["filename"]).write_bytes(WHEEL_BODY)
+    monkeypatch.setattr(package_access, "PACKAGE_INVENTORY",
+                        (dict(entry, sha256=WHEEL_DIGEST, size=len(WHEEL_BODY)),))
+    return cache, entry
+
+def test_package_route_serves_hash_verified_image_cache_bytes(tmp_path, monkeypatch):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cache, entry = image_cache(tmp_path, monkeypatch)
+            gateway.packages = PackageBroker(cache)
+            cap = capability(gateway)
+            response = await client.post("/package", headers=headers(), json={
+                "registry": "pypi", "name": "six", "version": "1.17.0"})
+            assert response.status == 200
+            assert await response.read() == WHEEL_BODY
+            assert response.headers["X-Peterbot-Sha256"] == WHEEL_DIGEST
+            assert response.headers["X-Peterbot-Filename"] == entry["filename"]
+            assert response.headers["X-Peterbot-Source"] == "image_cache"
+            assert int(response.headers["X-Peterbot-Size"]) == len(WHEEL_BODY)
+            # Bytes land in the task quota, not in any model-visible payload.
+            assert cap.package_bytes == len(WHEEL_BODY)
+
+    asyncio.run(scenario())
+
+
+def test_package_route_accumulates_quota_and_refuses_over_limit(tmp_path, monkeypatch):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cache, _entry = image_cache(tmp_path, monkeypatch)
+            gateway.packages = PackageBroker(cache)
+            cap = capability(gateway)
+            cap.package_bytes = PACKAGE_TASK_BYTES  # prior fetches already spent the quota
+            response = await client.post("/package", headers=headers(), json={
+                "registry": "pypi", "name": "six", "version": "1.17.0"})
+            assert response.status == 429
+            assert "quota" in (await response.text()).lower()
+
+    asyncio.run(scenario())
+
+
+def test_package_route_refuses_when_deadline_is_too_close(tmp_path, monkeypatch):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cache, _entry = image_cache(tmp_path, monkeypatch)
+            gateway.packages = PackageBroker(cache)
+            cap = capability(gateway, deadline=time.monotonic() + 5)
+            started = time.monotonic()
+            response = await client.post("/package", headers=headers(), json={
+                "registry": "pypi", "name": "six", "version": "1.17.0"})
+            assert response.status == 429
+            assert time.monotonic() - started < 1  # refused without attempting a fetch
+
+    asyncio.run(scenario())
+
+
+def test_package_route_rejects_malformed_body_and_unknown_names(tmp_path, monkeypatch):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            cache, _entry = image_cache(tmp_path, monkeypatch)
+            gateway.packages = PackageBroker(cache)
+            capability(gateway)
+            for body in ({"registry": "pypi", "name": "six"},
+                         {"registry": "evil", "name": "six", "version": "1.17.0"},
+                         {"registry": "pypi", "name": "../../etc", "version": "1.17.0"},
+                         {"registry": "pypi", "name": "six", "version": "1.0; rm -rf /"}):
+                response = await client.post("/package", headers=headers(), json=body)
+                assert response.status == 400, body
+                assert (await response.json())["code"] in {
+                    "invalid_request", "invalid_registry", "invalid_name", "invalid_version"}
+
+    asyncio.run(scenario())
+
+
+def test_package_route_maps_unavailable_provider_to_503(tmp_path, monkeypatch):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            capability(gateway)
+
+            async def down(args, quota=PACKAGE_TASK_BYTES):
+                raise PackageError("provider_unavailable", "registry down", 503)
+
+            monkeypatch.setattr(gateway.packages, "serve", down)
+            response = await client.post("/package", headers=headers(), json={
+                "registry": "pypi", "name": "unpinned-project", "version": "2.0.0"})
+            assert response.status == 503
+            assert (await response.json())["code"] == "provider_unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_package_route_requires_authenticated_capability(tmp_path):
+    async def scenario():
+        async with gateway_client(tmp_path) as (gateway, client):
+            for auth in ({}, headers("unknown")):
+                response = await client.post("/package", headers=auth, json={
+                    "registry": "pypi", "name": "six", "version": "1.17.0"})
+                assert response.status == 401
+            capability(gateway, status="completed")
+            response = await client.post("/package", headers=headers(), json={
+                "registry": "pypi", "name": "six", "version": "1.17.0"})
+            assert response.status == 403  # finished jobs get no broker access
 
     asyncio.run(scenario())

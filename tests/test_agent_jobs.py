@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
@@ -17,6 +18,39 @@ def store(tmp_path):
 def create(store, user_id=1, guild_id=10, **kwargs):
     return store.create(guild_id=guild_id, user_id=user_id, channel_id=20,
                         source_message_id=30, prompt="Research hardware options", **kwargs)
+
+
+def test_legacy_delivered_jobs_keep_their_receipt_during_migration(tmp_path):
+    path = tmp_path / 'legacy.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.execute('''CREATE TABLE jobs (
+            id TEXT PRIMARY KEY, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL, source_message_id INTEGER NOT NULL,
+            prompt TEXT NOT NULL, parent_id TEXT, status TEXT NOT NULL,
+            answer TEXT NOT NULL DEFAULT '', artifacts TEXT NOT NULL DEFAULT '[]',
+            delivered INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL)''')
+        for job_id, delivered in (('already-sent', 1), ('needs-send', 0)):
+            db.execute('''INSERT INTO jobs
+                (id,guild_id,user_id,channel_id,source_message_id,prompt,status,
+                 answer,delivered,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                (job_id, 10, 1, 20, 30, 'Legacy work', 'completed',
+                 'Done', delivered, '2026-09-01', '2026-09-01'))
+    store = JobStore(str(path))
+    try:
+        assert store.get('already-sent')['delivery_status'] == 'delivered'
+        assert store.get('needs-send')['delivery_status'] == 'pending'
+        assert [job['id'] for job in store.undelivered()] == ['needs-send']
+    finally:
+        store.close()
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE jobs SET delivery_status='pending' WHERE id='already-sent'")
+    reopened = JobStore(str(path))
+    try:
+        assert reopened.get('already-sent')['delivery_status'] == 'delivered'
+    finally:
+        reopened.close()
 
 
 def test_restart_interrupts_running_but_preserves_queued_and_finished(tmp_path):
@@ -396,3 +430,55 @@ def test_abandoned_submission_is_terminal_and_undelivered(store):
     assert after["delivered"] == 1
     assert store.undelivered() == []
     assert store.transition(job["id"], to="queued") is False
+
+
+def test_project_binding_survives_restart_and_cannot_change(tmp_path):
+    path = str(tmp_path / 'jobs.sqlite')
+    first = JobStore(path)
+    project_id = 'a' * 32
+    job = create(first, project_id=project_id)
+    assert first.get(job['id'])['project_id'] == project_id
+    assert first.link_project(job['id'], project_id)
+    assert not first.link_project(job['id'], 'b' * 32)
+    first.close()
+    reopened = JobStore(path)
+    try:
+        assert reopened.get(job['id'])['project_id'] == project_id
+        unbound = create(reopened)
+        assert reopened.link_project(unbound['id'], 'b' * 32)
+        assert reopened.get(unbound['id'])['project_id'] == 'b' * 32
+        with pytest.raises(ValueError, match='project id'):
+            create(reopened, project_id='../bad')
+    finally:
+        reopened.close()
+
+
+def test_progress_events_are_fixed_ordered_and_terminal_frozen(store):
+    job = create(store)
+    assert job['stage'] == 'queued'
+    assert store.claim(job['id'])
+    assert store.get(job['id'])['stage'] == 'starting'
+    assert store.update_progress(job['id'], seq=1, stage='researching')
+    assert not store.update_progress(job['id'], seq=1, stage='running_code')
+    assert store.get(job['id'])['stage'] == 'researching'
+    with pytest.raises(ValueError):
+        store.update_progress(job['id'], seq=2, stage='Peter says SECRET')
+    with pytest.raises(ValueError):
+        store.update_progress(job['id'], seq=0, stage='editing_files')
+    assert store.update_progress(job['id'], seq=2, stage='running_code')
+    assert store.transition(job['id'], to='completed', answer='Done')
+    assert store.get(job['id'])['stage'] == 'completed'
+    assert not store.update_progress(job['id'], seq=3, stage='researching')
+
+
+def test_long_fast_answer_has_durable_delivery_without_queue_capacity(store):
+    for user_id in range(1, 21):
+        create(store, user_id=user_id)
+    answer = 'useful detail ' * 400
+    reply = store.record_fast_answer(guild_id=10, user_id=99, channel_id=20,
+        source_message_id=900, prompt='explain carefully', answer=answer)
+    assert reply['status'] == 'completed' and reply['delivery_status'] == 'pending'
+    assert reply['stage'] == 'completed' and reply['answer'] == answer
+    assert store.record_fast_answer(guild_id=10, user_id=99, channel_id=20,
+        source_message_id=900, prompt='explain carefully', answer=answer)['id'] == reply['id']
+    assert [item['id'] for item in store.undelivered()] == [reply['id']]

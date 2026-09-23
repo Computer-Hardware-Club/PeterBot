@@ -49,6 +49,9 @@ services:
       PETERBOT_RUNNER_SCOPE: peterbot
       PETERBOT_RUNNER_CONCURRENCY: 1
       PETERBOT_RUNNER_TIMEOUT: 1230
+      # Bounded build profile (4 CPU / 4g / 2g workspace); rustc linking peaks above the
+      # old 2g ceiling. Operator can downgrade to standard/small per host capacity.
+      PETERBOT_WORKER_PROFILE: ${PETERBOT_WORKER_PROFILE:-build}
     # Trusted supervisor only. Worker containers never receive this socket.
     volumes: ['/var/run/docker.sock:/var/run/docker.sock']
     read_only: true

@@ -1,18 +1,24 @@
 """Exercise registered Discord handlers with the real admission guard."""
 
 import asyncio
+import itertools
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import discord
 
 import peterbot.commands as handlers
 import peterbot.context as delivery
+from peterbot.foreground import ForegroundScheduler
 from peterbot.guardrails import GuardLimits, RequestGuard
+from peterbot.agent_policy import PolicyDenied
+from peterbot.agent_policy import Principal
 from test_llama_cpp_client import build_config
+
+_interaction_ids = itertools.count(500)
 
 
 class FakeTree:
@@ -50,6 +56,8 @@ def setup_handlers(tmp_path, monkeypatch):
         request_guard=RequestGuard(GuardLimits()),
         llm_client=SimpleNamespace(call_chat=AsyncMock(return_value="Here is the answer.")),
         knowledge_index=SimpleNamespace(chunks=[], channel_profiles={}),
+        foreground=ForegroundScheduler(str(tmp_path / "foreground.sqlite3"),
+                                       ack_after=0.05, poll=0.01, total_timeout=0.3),
     )
     monkeypatch.setattr(handlers, "get_channel_context_messages", AsyncMock(return_value=[]))
     monkeypatch.setattr(handlers, "get_recent_channel_entries", AsyncMock(return_value=[]))
@@ -61,14 +69,18 @@ def setup_handlers(tmp_path, monkeypatch):
     return bot, runtime
 
 
-def interaction(user_id=1):
+def interaction(user_id=1, interaction_id=None):
     return SimpleNamespace(
+        id=interaction_id or next(_interaction_ids),
         user=SimpleNamespace(id=user_id, display_name="Student"),
         guild=SimpleNamespace(id=10, name="Club"),
         channel=SimpleNamespace(id=20, name="hardware"),
         response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
         created_at=datetime.now(timezone.utc),
     )
+
+
 
 
 def assert_another_user_can_start(runtime):
@@ -108,6 +120,35 @@ def test_recap_empty_history_early_return_releases_slot(setup_handlers):
     assert_another_user_can_start(runtime)
 
 
+def test_recap_respects_officer_pilot_before_reading_history(setup_handlers):
+    bot, runtime = setup_handlers
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(allowed_guild_ids=frozenset({10}),
+                                 listen_channel_ids=frozenset()),
+        principal=AsyncMock(side_effect=PolicyDenied('The agent pilot is currently available to officers only')),
+        style=SimpleNamespace(instruction=Mock()),
+    )
+    asyncio.run(bot.tree.callbacks['recap'](interaction(), 10))
+    handlers.get_recent_channel_entries.assert_not_awaited()
+    runtime.llm_client.call_chat.assert_not_awaited()
+    assert 'officers only' in handlers.safe_send_interaction_message.await_args.args[1]
+
+
+def test_recap_uses_current_style_instruction(setup_handlers, monkeypatch):
+    bot, runtime = setup_handlers
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(allowed_guild_ids=frozenset({10}),
+                                 listen_channel_ids=frozenset()),
+        principal=AsyncMock(return_value=Principal(10, 1, 20, (100,))),
+        style=SimpleNamespace(instruction=Mock(return_value='Keep the recap relaxed.')),
+    )
+    handlers.get_recent_channel_entries.return_value = [object()]
+    monkeypatch.setattr(handlers, 'build_recap_history', lambda *args: [])
+    asyncio.run(bot.tree.callbacks['recap'](interaction(), 10))
+    runtime.hermes.principal.assert_awaited_once()
+    assert 'Keep the recap relaxed.' in runtime.llm_client.call_chat.await_args.kwargs['system_prompt']
+
+
 @pytest.mark.parametrize("failure", ["defer", "history"])
 def test_recap_releases_slot_after_failure(setup_handlers, failure):
     bot, runtime = setup_handlers
@@ -120,15 +161,34 @@ def test_recap_releases_slot_after_failure(setup_handlers, failure):
     assert_another_user_can_start(runtime)
 
 
-def test_rejected_ask_cannot_release_active_request_or_read_history(setup_handlers):
+def test_queued_ask_reads_no_history_and_makes_no_model_call(setup_handlers):
+    """PETER-04: a second request waits in the FIFO queue. While queued it is
+    a deterministic ack only — no Discord reads, no model call — and its
+    rejection never touches the running request's guard state."""
     bot, runtime = setup_handlers
-    assert runtime.request_guard.acquire(user_id=1, guild_id=10, prompt="first")[0]
-    asyncio.run(bot.tree.callbacks["ask"](interaction(1), "duplicate"))
-    asyncio.run(bot.tree.callbacks["ask"](interaction(2), "busy"))
-    handlers.get_channel_context_messages.assert_not_awaited()
-    runtime.llm_client.call_chat.assert_not_awaited()
-    assert not runtime.request_guard.acquire(user_id=3, guild_id=10, prompt="still busy")[0]
-    runtime.request_guard.release(user_id=1)
+    entered, never = asyncio.Event(), asyncio.Event()
+
+    async def stalled_model(*args, **kwargs):
+        entered.set()
+        await never.wait()
+
+    async def scenario():
+        runtime.llm_client.call_chat.side_effect = stalled_model
+        first = asyncio.create_task(bot.tree.callbacks["ask"](interaction(1, 501), "first"))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        second = asyncio.create_task(bot.tree.callbacks["ask"](interaction(2, 502), "queued"))
+        await asyncio.sleep(0.15)
+        # Only the running request ever read history; the queued one produced
+        # just its ephemeral ack.
+        assert handlers.get_channel_context_messages.await_count == 1
+        assert handlers.safe_send_interaction_message.await_args.kwargs["ephemeral"] is True
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        never.set()
+        await asyncio.wait_for(first, timeout=1)
+
+    asyncio.run(scenario())
     assert_another_user_can_start(runtime)
 
 
@@ -191,6 +251,99 @@ def mention(bot):
         channel=SimpleNamespace(id=20, name="hardware"),
         created_at=datetime.now(timezone.utc),
     )
+
+
+def test_private_control_request_without_mention_uses_trusted_gateway(setup_handlers):
+    bot, runtime = setup_handlers
+    handle = AsyncMock(return_value=True)
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(control_channel_ids=frozenset({20}),
+                                 listen_channel_ids=frozenset(), allowed_guild_ids=frozenset({10})),
+        handle_control_message=handle,
+    )
+    request = mention(bot)
+    request.mentions = []
+    request.content = 'set public club fact meeting_room to KEC 1005'
+    asyncio.run(bot.events['on_message'](request))
+    handle.assert_awaited_once()
+    runtime.llm_client.call_chat.assert_not_awaited()
+    bot.process_commands.assert_awaited_once()
+
+
+def test_denied_control_request_never_falls_to_legacy_model(setup_handlers):
+    bot, runtime = setup_handlers
+    handle = AsyncMock(side_effect=PolicyDenied('Use the configured private officer control channel'))
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(control_channel_ids=frozenset({20}),
+                                 listen_channel_ids=frozenset(), allowed_guild_ids=frozenset({10})),
+        handle_control_message=handle,
+    )
+    request = mention(bot)
+    request.mentions = []
+    request.content = 'set public club fact meeting_room to KEC 1005'
+    asyncio.run(bot.events['on_message'](request))
+    handle.assert_awaited_once()
+    runtime.llm_client.call_chat.assert_not_awaited()
+    assert 'private officer' in handlers.send_chunked_reply.await_args.args[1]
+
+
+def test_denied_club_mention_never_falls_to_legacy_model(setup_handlers):
+    bot, runtime = setup_handlers
+    reply = AsyncMock(side_effect=PolicyDenied('The agent pilot is currently available to officers only'))
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(control_channel_ids=frozenset(),
+                                 listen_channel_ids=frozenset(), allowed_guild_ids=frozenset({10})),
+        eligible=AsyncMock(return_value=False), respond_to_message=reply,
+    )
+    asyncio.run(bot.events['on_message'](mention(bot)))
+    reply.assert_awaited_once()
+    runtime.hermes.eligible.assert_not_awaited()
+    runtime.llm_client.call_chat.assert_not_awaited()
+    assert 'officers only' in handlers.send_chunked_reply.await_args.args[1]
+
+
+def test_ask_uses_fresh_hermes_facts_and_private_context_when_enabled(setup_handlers):
+    bot, runtime = setup_handlers
+    saved = Mock()
+    hermes = SimpleNamespace(
+        principal=AsyncMock(return_value=Principal(10, 1, 20, (100,))),
+        conversational_reply=AsyncMock(return_value='KEC 1005 on Fridays.'),
+        conversations=SimpleNamespace(append_turn=saved),
+    )
+    runtime.hermes = hermes
+    asyncio.run(bot.tree.callbacks['ask'](interaction(1, 801), 'Where do we meet?'))
+    hermes.conversational_reply.assert_awaited_once()
+    assert hermes.conversational_reply.await_args.kwargs['audience'] == 'private'
+    assert 0 < hermes.conversational_reply.await_args.kwargs['budget_seconds'] <= runtime.config.agent.request_timeout_seconds
+    assert handlers.send_chunked_followup.await_args.args[1] == 'KEC 1005 on Fridays.'
+    assert saved.call_args.kwargs['audience'] == 'private'
+    runtime.llm_client.call_chat.assert_not_awaited()
+
+
+def test_ask_handoff_keeps_foreground_slot_and_never_uses_legacy_fallback(setup_handlers):
+    bot, runtime = setup_handlers
+    hermes = SimpleNamespace(
+        principal=AsyncMock(return_value=Principal(10, 1, 20, (100,))),
+        conversational_reply=AsyncMock(return_value=None),
+        jobs=SimpleNamespace(latest_for_thread=lambda *args: None),
+        submit=AsyncMock(return_value={'guild_id': 10, 'channel_id': 21}),
+        conversations=SimpleNamespace(append_turn=Mock()),
+    )
+    runtime.hermes = hermes
+    asyncio.run(bot.tree.callbacks['ask'](interaction(1, 802), 'Research the latest Rust release'))
+    hermes.submit.assert_awaited_once()
+    assert 'https://discord.com/channels/10/21' in handlers.send_chunked_followup.await_args.args[1]
+    hermes.conversations.append_turn.assert_not_called()
+    runtime.llm_client.call_chat.assert_not_awaited()
+
+
+def test_ask_privileged_denial_has_no_legacy_fallback(setup_handlers):
+    bot, runtime = setup_handlers
+    runtime.hermes = SimpleNamespace(principal=AsyncMock(side_effect=PolicyDenied('Officer pilot')))
+    asyncio.run(bot.tree.callbacks['ask'](interaction(1, 803), 'Run code'))
+    runtime.llm_client.call_chat.assert_not_awaited()
+    handlers.send_chunked_followup.assert_not_awaited()
+    assert 'Officer pilot' in handlers.safe_send_interaction_message.await_args.args[1]
 
 
 def test_unusable_mention_image_early_return_releases_slot(setup_handlers, monkeypatch):

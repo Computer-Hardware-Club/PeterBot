@@ -8,7 +8,9 @@ from typing import Any, Optional
 import discord
 from discord.ext import commands, tasks
 
+from .agent_policy import PolicyDenied
 from .awareness import AwarenessRouter
+from .foreground import DuplicateEvent, ForegroundCancelled
 from .context import (
     build_current_mention_prompt_text,
     build_mention_context_bundle,
@@ -232,10 +234,16 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             channel_profiles=len(runtime.knowledge_index.channel_profiles),
         )
 
-        if getattr(runtime, "hermes", None) is not None:
-            await runtime.hermes.start()
-
         if not runtime.has_initialized:
+            # One-shot restart reconciliation before any queue pump starts.
+            # With Hermes on, recovery happens inside hermes.start() strictly
+            # after the singleton lease is acquired — a refused duplicate
+            # process must never touch the live process's rows.
+            if getattr(runtime, "hermes", None) is None \
+                    and getattr(runtime, "foreground", None) is not None:
+                summary = runtime.foreground.recover()
+                if any(summary.values()):
+                    log_with_context(logging.WARNING, "Foreground restart reconciliation", **summary)
             runtime.reminder_manager.load_reminders()
             await check_missed_reminders(
                 bot,
@@ -243,6 +251,9 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 retry_delay=runtime.retry_delay,
             )
             runtime.has_initialized = True
+
+        if getattr(runtime, "hermes", None) is not None:
+            await runtime.hermes.start()
 
         if not runtime.has_synced_commands:
             try:
@@ -261,40 +272,69 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             return
 
         router = configured_awareness()
+        hermes = getattr(runtime, "hermes", None)
+        control_proposal = None
+        if hermes is not None and message.guild is not None:
+            from .control_requests import parse_control_request
+            control_proposal = parse_control_request(message.content,
+                bot_user_id=getattr(bot.user, 'id', None))
         direct_mention = bool(bot.user and bot.user in (getattr(message, "mentions", None) or []))
         address_reason = "mention" if direct_mention else (await router.addressed(message) if router else None)
+        if control_proposal is not None and message.channel.id in hermes.settings.control_channel_ids:
+            address_reason = address_reason or "control"
         if address_reason:
             content = build_current_mention_prompt_text(message, bot_user_id=bot.user.id)
-            if getattr(runtime, "hermes", None) is not None and await runtime.hermes.eligible(
-                getattr(message.guild,"id",None),message.author.id,message.channel.id
-            ):
-                from .agent_policy import PolicyDenied
-                admitted, reason = runtime.request_guard.acquire(user_id=message.author.id,guild_id=message.guild.id,prompt=content)
-                if not admitted:
-                    await send_chunked_reply(message,reason or 'Give me a moment.')
-                    return
-                if router:
-                    router.remember(message, address_reason)
-                try:
-                    await runtime.hermes.respond_to_message(message,content)
-                except (ValueError,PolicyDenied) as exc:
-                    await send_chunked_reply(message,str(exc))
-                except Exception:
-                    log_exception_with_context('Conversation reply failed',**message_log_context(message))
-                    await send_chunked_reply(message,'Something went wrong. Try me again in a moment.')
-                finally:
-                    runtime.request_guard.release(user_id=message.author.id)
-                return
-            admitted, reason = runtime.request_guard.acquire(
+            foreground = runtime.foreground
+            guild_id = getattr(message.guild, "id", None) or message.channel.id
+            # Deterministic ingress validation first: no slot, no queue row,
+            # no model call for a message we would reject anyway.
+            admitted, reason = runtime.request_guard.preflight(
                 user_id=message.author.id, guild_id=getattr(message.guild, "id", None), prompt=content,
             )
             if not admitted:
                 await send_chunked_reply(message, reason or "Please try again shortly.",
                                          max_len=config.max_discord_message_chars)
+                await bot.process_commands(message)
                 return
-            if router:
-                router.remember(message, address_reason)
-            try:
+            # In the configured guild, a denied Hermes pilot request must not
+            # fall through to the old unrestricted mention model path.
+            hermes_path = hermes is not None and (
+                control_proposal is not None
+                or getattr(message.guild, "id", None) in getattr(
+                    getattr(hermes, "settings", None), "allowed_guild_ids", frozenset())
+                or await hermes.eligible(
+                    getattr(message.guild, "id", None), message.author.id, message.channel.id)
+            )
+
+            def guarded(work):
+                async def run():
+                    ok, why = runtime.request_guard.acquire(
+                        user_id=message.author.id,
+                        guild_id=getattr(message.guild, "id", None), prompt=content)
+                    if not ok:
+                        raise ValueError(why or "Give me a moment.")
+                    try:
+                        return await work()
+                    finally:
+                        runtime.request_guard.release(user_id=message.author.id)
+                return run
+
+            async def hermes_work():
+                try:
+                    if control_proposal is not None:
+                        if message.attachments:
+                            raise ValueError('Club control requests cannot include attachments.')
+                        if await hermes.handle_control_message(message, content):
+                            return
+                        raise ValueError('I could not recognize that control request clearly.')
+                    await hermes.respond_to_message(message, content)
+                except (ValueError, PolicyDenied):
+                    raise
+                except Exception:
+                    log_exception_with_context('Conversation reply failed', **message_log_context(message))
+                    await send_chunked_reply(message, 'Something went wrong. Try me again in a moment.')
+
+            async def direct_mention_work():
                 # Outer slack over the model deadline, so a slow round is reported by
                 # call_chat's own timeout instead of as an internal error here.
                 async with asyncio.timeout(config.agent.request_timeout_seconds + 15):
@@ -309,7 +349,6 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                             image_error,
                             max_len=config.max_discord_message_chars,
                         )
-                        await bot.process_commands(message)
                         return
 
                     recent_entries = await get_recent_channel_entries(
@@ -362,7 +401,6 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                             mention_bundle["clarification_text"],
                             max_len=config.max_discord_message_chars,
                         )
-                        await bot.process_commands(message)
                         return
 
                     system_prompt, knowledge_chunks = build_prompt_artifacts(
@@ -399,6 +437,34 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                         reply or "(No response)",
                         max_len=config.max_discord_message_chars,
                     )
+
+            work = guarded(hermes_work if hermes_path else direct_mention_work)
+
+            if router:
+                router.remember(message, address_reason)
+
+            async def acknowledge(position: int) -> None:
+                # Transport-only queue ack: no model call, and it carries only
+                # a count — never another requester's prompt or channel.
+                await send_chunked_reply(
+                    message,
+                    f"{position} ahead of you, i'll reply here",
+                    max_len=config.max_discord_message_chars)
+
+            try:
+                await foreground.run_one(
+                    kind='chat', guild_id=guild_id, user_id=message.author.id,
+                    channel_id=message.channel.id, source_message_id=message.id,
+                    work=work, acknowledge=acknowledge)
+            except DuplicateEvent:
+                log_with_context(logging.DEBUG, "Suppressed duplicate Discord event",
+                                 **message_log_context(message))
+            except (ValueError, PolicyDenied) as exc:
+                await send_chunked_reply(message, str(exc),
+                                         max_len=config.max_discord_message_chars)
+            except ForegroundCancelled as exc:
+                await send_chunked_reply(message, str(exc),
+                                         max_len=config.max_discord_message_chars)
             except Exception:
                 debug_id = log_exception_with_context(
                     "Failed handling mention response",
@@ -413,8 +479,6 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                     ),
                     max_len=config.max_discord_message_chars,
                 )
-            finally:
-                runtime.request_guard.release(user_id=message.author.id)
 
         await bot.process_commands(message)
 
@@ -480,41 +544,92 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
     @bot.tree.command(name="ask", description="Ask Peter a question")
     @discord.app_commands.describe(prompt="Your question or prompt for Peter")
     async def ask(interaction: discord.Interaction, prompt: str) -> None:
-        admitted, reason = runtime.request_guard.acquire(
-            user_id=interaction.user.id, guild_id=getattr(interaction.guild, "id", None), prompt=prompt,
+        guild_id = getattr(interaction.guild, "id", None)
+        admitted, reason = runtime.request_guard.preflight(
+            user_id=interaction.user.id, guild_id=guild_id, prompt=prompt,
         )
         if not admitted:
             await safe_send_interaction_message(interaction, reason or "Please try again shortly.")
             return
+        # Defer first so a queue ack and the eventual answer both fit the
+        # interaction lifetime; the ack is ephemeral like the answer, so a
+        # private /ask never touches a public channel.
         try:
-            async with asyncio.timeout(config.agent.request_timeout_seconds):
-                await interaction.response.defer(ephemeral=True)
-                context_messages = await get_channel_context_messages(
-                    interaction.channel,
-                    bot_user_id=getattr(bot.user, "id", None),
-                    peter_name=config.peter_name,
-                    limit=config.channel_context_limit,
-                    before=interaction.created_at,
-                    max_chars=config.max_context_message_chars,
-                )
-                system_prompt, knowledge_chunks = build_prompt_artifacts(
-                    config=config,
-                    knowledge_index=runtime.knowledge_index,
-                    prompt_text=prompt,
-                    author_name=interaction.user.display_name,
-                    guild_name=interaction.guild.name if interaction.guild else None,
-                    channel=interaction.channel,
-                    mode=CHAT_MODE,
-                )
-                log_with_context(
-                    logging.DEBUG,
-                    "Resolved /ask prompt artifacts",
-                    knowledge_count=len(knowledge_chunks),
-                    **interaction_log_context(interaction),
-                )
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            debug_id = log_exception_with_context(
+                "Failed to defer /ask interaction",
+                prompt_preview=truncate_for_log(prompt),
+                **interaction_log_context(interaction),
+            )
+            await safe_send_interaction_message(
+                interaction,
+                build_user_debug_message("I couldn't acknowledge that request. Try again.", debug_id),
+            )
+            return
 
-                if hasattr(interaction.channel, "typing"):
-                    async with interaction.channel.typing():
+        async def work():
+            ok, why = runtime.request_guard.acquire(
+                user_id=interaction.user.id, guild_id=guild_id, prompt=prompt)
+            if not ok:
+                raise ValueError(why or "Please try again shortly.")
+            try:
+                async with asyncio.timeout(config.agent.request_timeout_seconds) as turn_timeout:
+                    context_messages = await get_channel_context_messages(
+                        interaction.channel,
+                        bot_user_id=getattr(bot.user, "id", None),
+                        peter_name=config.peter_name,
+                        limit=config.channel_context_limit,
+                        before=interaction.created_at,
+                        max_chars=config.max_context_message_chars,
+                    )
+                    hermes = getattr(runtime, 'hermes', None)
+                    if hermes is not None:
+                        if guild_id is None:
+                            raise PolicyDenied('Use Peter in the club server; DMs are disabled.')
+                        principal = await hermes.principal(guild_id, interaction.user.id,
+                                                           interaction.channel.id)
+                        reply = await hermes.conversational_reply(
+                            principal, prompt, context_messages, audience='private',
+                            budget_seconds=max(0.0, turn_timeout.when() - asyncio.get_running_loop().time()))
+                        if reply is not None:
+                            return reply
+                        parent = hermes.jobs.latest_for_thread(
+                            principal.guild_id, principal.user_id, principal.channel_id)
+                        job = await hermes.submit(guild_id=principal.guild_id,
+                            user_id=principal.user_id, channel=interaction.channel,
+                            source_message_id=interaction.id, prompt=prompt,
+                            parent_id=parent['id'] if parent else None)
+                        return (f"This needs tools, so I started it in your task thread: "
+                                f"https://discord.com/channels/{job['guild_id']}/{job['channel_id']}")
+                    system_prompt, knowledge_chunks = build_prompt_artifacts(
+                        config=config,
+                        knowledge_index=runtime.knowledge_index,
+                        prompt_text=prompt,
+                        author_name=interaction.user.display_name,
+                        guild_name=interaction.guild.name if interaction.guild else None,
+                        channel=interaction.channel,
+                        mode=CHAT_MODE,
+                    )
+                    log_with_context(
+                        logging.DEBUG,
+                        "Resolved /ask prompt artifacts",
+                        knowledge_count=len(knowledge_chunks),
+                        **interaction_log_context(interaction),
+                    )
+
+                    if hasattr(interaction.channel, "typing"):
+                        async with interaction.channel.typing():
+                            reply = await runtime.llm_client.call_chat(
+                                prompt_text=prompt,
+                                author_name=interaction.user.display_name,
+                                guild_name=interaction.guild.name if interaction.guild else None,
+                                channel_name=getattr(interaction.channel, "name", None),
+                                conversation_history=context_messages,
+                                system_prompt=system_prompt,
+                                response_mode=CHAT_MODE,
+                            )
+                    else:
                         reply = await runtime.llm_client.call_chat(
                             prompt_text=prompt,
                             author_name=interaction.user.display_name,
@@ -524,28 +639,52 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                             system_prompt=system_prompt,
                             response_mode=CHAT_MODE,
                         )
-                else:
-                    reply = await runtime.llm_client.call_chat(
-                        prompt_text=prompt,
-                        author_name=interaction.user.display_name,
-                        guild_name=interaction.guild.name if interaction.guild else None,
-                        channel_name=getattr(interaction.channel, "name", None),
-                        conversation_history=context_messages,
-                        system_prompt=system_prompt,
-                        response_mode=CHAT_MODE,
-                    )
-                delivered = await send_chunked_followup(
+                    return reply
+            finally:
+                runtime.request_guard.release(user_id=interaction.user.id)
+
+        async def acknowledge(position: int) -> None:
+            await safe_send_interaction_message(
+                interaction,
+                f"{position} ahead of you, i'll answer here",
+                ephemeral=True,
+            )
+
+        try:
+            _row, reply = await runtime.foreground.run_one(
+                kind='ask',
+                guild_id=guild_id or interaction.channel.id,
+                user_id=interaction.user.id,
+                channel_id=interaction.channel.id,
+                source_message_id=interaction.id,
+                work=work,
+                acknowledge=acknowledge,
+            )
+            delivered = await send_chunked_followup(
+                interaction,
+                reply or "(No response)",
+                ephemeral=True,
+                max_len=config.max_discord_message_chars,
+            )
+            if not delivered:
+                await safe_send_interaction_message(
                     interaction,
-                    reply or "(No response)",
+                    "I generated a reply but couldn't deliver it. Please try again.",
                     ephemeral=True,
-                    max_len=config.max_discord_message_chars,
                 )
-                if not delivered:
-                    await safe_send_interaction_message(
-                        interaction,
-                        "I generated a reply but couldn't deliver it. Please try again.",
-                        ephemeral=True,
-                    )
+            elif getattr(runtime, 'hermes', None) is not None and reply and not reply.startswith('This needs tools,'):
+                try:
+                    runtime.hermes.conversations.append_turn(
+                        guild_id=guild_id, user_id=interaction.user.id,
+                        channel_id=interaction.channel.id, source_message_id=interaction.id,
+                        audience='private', prompt=prompt, answer=reply)
+                except Exception:
+                    log_exception_with_context('Could not record a delivered /ask turn')
+        except DuplicateEvent:
+            log_with_context(logging.DEBUG, "Suppressed duplicate /ask interaction",
+                             **interaction_log_context(interaction))
+        except (ValueError, PolicyDenied, ForegroundCancelled) as exc:
+            await safe_send_interaction_message(interaction, str(exc), ephemeral=True)
         except Exception:
             debug_id = log_exception_with_context(
                 "Error in /ask command",
@@ -560,68 +699,123 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 ),
                 ephemeral=True,
             )
-        finally:
-            runtime.request_guard.release(user_id=interaction.user.id)
 
     @bot.tree.command(name="recap", description="Summarize the recent discussion in this channel")
     @discord.app_commands.describe(count="How many recent messages to include in the recap")
     async def recap(interaction: discord.Interaction, count: int = 25) -> None:
-        admitted, reason = runtime.request_guard.acquire(
-            user_id=interaction.user.id, guild_id=getattr(interaction.guild, "id", None), prompt="Recap the recent channel discussion.",
+        guild_id = getattr(interaction.guild, "id", None)
+        prompt_text = "Recap the recent channel discussion."
+        admitted, reason = runtime.request_guard.preflight(
+            user_id=interaction.user.id, guild_id=guild_id, prompt=prompt_text,
         )
         if not admitted:
             await safe_send_interaction_message(interaction, reason or "Please try again shortly.")
             return
         try:
-            async with asyncio.timeout(config.agent.request_timeout_seconds):
-                await interaction.response.defer(ephemeral=True)
-                recap_count = clamp_recap_count(count, config.recap_max_messages)
-                recent_entries = await get_recent_channel_entries(
-                    interaction.channel,
-                    bot_user_id=getattr(bot.user, "id", None),
-                    peter_name=config.peter_name,
-                    limit=recap_count,
-                    before=interaction.created_at,
-                    max_chars=config.max_context_message_chars,
-                )
-                if not recent_entries:
-                    await safe_send_interaction_message(
-                        interaction,
-                        "I couldn't find enough recent messages to recap.",
-                        ephemeral=True,
-                    )
-                    return
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            debug_id = log_exception_with_context(
+                "Failed to defer /recap interaction",
+                requested_count=count,
+                **interaction_log_context(interaction),
+            )
+            await safe_send_interaction_message(
+                interaction,
+                build_user_debug_message("I couldn't acknowledge that request. Try again.", debug_id),
+            )
+            return
 
-                system_prompt, _ = build_prompt_artifacts(
-                    config=config,
-                    knowledge_index=runtime.knowledge_index,
-                    prompt_text="Summarize the recent channel discussion.",
-                    author_name=interaction.user.display_name,
-                    guild_name=interaction.guild.name if interaction.guild else None,
-                    channel=interaction.channel,
-                    mode=RECAP_MODE,
-                    include_channel_profile=False,
-                    include_knowledge=False,
-                )
-                reply = await runtime.llm_client.call_chat(
-                    prompt_text=f"Summarize the last {len(recent_entries)} messages in this channel.",
-                    author_name=interaction.user.display_name,
-                    guild_name=interaction.guild.name if interaction.guild else None,
-                    channel_name=getattr(interaction.channel, "name", None),
-                    conversation_history=build_recap_history(recent_entries, interaction.created_at),
-                    system_prompt=system_prompt,
-                    user_content=(
-                        f"[Recap request | now] {interaction.user.display_name}: "
-                        f"Recap the last {len(recent_entries)} messages."
-                    ),
-                    response_mode=RECAP_MODE,
-                )
+        async def work():
+            # History is only read once the slot is ours: a queued recap does
+            # no Discord reads and no model call while it waits.
+            ok, why = runtime.request_guard.acquire(
+                user_id=interaction.user.id, guild_id=guild_id, prompt=prompt_text)
+            if not ok:
+                raise ValueError(why or "Please try again shortly.")
+            try:
+                async with asyncio.timeout(config.agent.request_timeout_seconds):
+                    style_instruction = ''
+                    hermes = getattr(runtime, 'hermes', None)
+                    if hermes is not None and guild_id in getattr(
+                            getattr(hermes, 'settings', None), 'allowed_guild_ids', frozenset()):
+                        await hermes.principal(guild_id, interaction.user.id, interaction.channel.id)
+                        style_instruction = hermes.style.instruction(guild_id)
+                    recap_count = clamp_recap_count(count, config.recap_max_messages)
+                    recent_entries = await get_recent_channel_entries(
+                        interaction.channel,
+                        bot_user_id=getattr(bot.user, "id", None),
+                        peter_name=config.peter_name,
+                        limit=recap_count,
+                        before=interaction.created_at,
+                        max_chars=config.max_context_message_chars,
+                    )
+                    if not recent_entries:
+                        await safe_send_interaction_message(
+                            interaction,
+                            "I couldn't find enough recent messages to recap.",
+                            ephemeral=True,
+                        )
+                        return None
+
+                    system_prompt, _ = build_prompt_artifacts(
+                        config=config,
+                        knowledge_index=runtime.knowledge_index,
+                        prompt_text="Summarize the recent channel discussion.",
+                        author_name=interaction.user.display_name,
+                        guild_name=interaction.guild.name if interaction.guild else None,
+                        channel=interaction.channel,
+                        mode=RECAP_MODE,
+                        include_channel_profile=False,
+                        include_knowledge=False,
+                    )
+                    if style_instruction:
+                        system_prompt += '\n\n' + style_instruction
+                    reply = await runtime.llm_client.call_chat(
+                        prompt_text=f"Summarize the last {len(recent_entries)} messages in this channel.",
+                        author_name=interaction.user.display_name,
+                        guild_name=interaction.guild.name if interaction.guild else None,
+                        channel_name=getattr(interaction.channel, "name", None),
+                        conversation_history=build_recap_history(recent_entries, interaction.created_at),
+                        system_prompt=system_prompt,
+                        user_content=(
+                            f"[Recap request | now] {interaction.user.display_name}: "
+                            f"Recap the last {len(recent_entries)} messages."
+                        ),
+                        response_mode=RECAP_MODE,
+                    )
+                    return reply
+            finally:
+                runtime.request_guard.release(user_id=interaction.user.id)
+
+        async def acknowledge(position: int) -> None:
+            await safe_send_interaction_message(
+                interaction,
+                f"{position} ahead of you, i'll recap it here",
+                ephemeral=True,
+            )
+
+        try:
+            _row, reply = await runtime.foreground.run_one(
+                kind='recap',
+                guild_id=guild_id or interaction.channel.id,
+                user_id=interaction.user.id,
+                channel_id=interaction.channel.id,
+                source_message_id=interaction.id,
+                work=work,
+                acknowledge=acknowledge,
+            )
+            if reply is not None:
                 await send_chunked_followup(
                     interaction,
                     reply,
                     ephemeral=True,
                     max_len=config.max_discord_message_chars,
                 )
+        except DuplicateEvent:
+            log_with_context(logging.DEBUG, "Suppressed duplicate /recap interaction",
+                             **interaction_log_context(interaction))
+        except (ValueError, PolicyDenied, ForegroundCancelled) as exc:
+            await safe_send_interaction_message(interaction, str(exc), ephemeral=True)
         except Exception:
             debug_id = log_exception_with_context(
                 "Error in /recap command",
@@ -636,8 +830,6 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
                 ),
                 ephemeral=True,
             )
-        finally:
-            runtime.request_guard.release(user_id=interaction.user.id)
 
     @bot.tree.command(name="suggest", description="Submit a suggestion to improve the bot")
     @discord.app_commands.describe(suggestion="Your suggestion for improving the bot")

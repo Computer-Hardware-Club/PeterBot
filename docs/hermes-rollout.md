@@ -1,5 +1,10 @@
 # Hermes-backed Peter
 
+The officer-pilot status and sequence below are historical. For the current
+P910 VM and member rollout, use [release evidence](release-evidence.md),
+[Hermes operations](../deploy/HERMES.md), and the
+[cutover runbook](p910-cutover.md).
+
 Status: officer pilot deployed and healthy on p910; see deploy/HERMES.md for operating boundaries and deployment instructions. The merged gateway image suite on September 22 passed 713 tests with 1 optional runtime test skipped; that pinned Hermes fixture passed separately inside the worker image. Earlier real Qwen smoke completed calculation, attachment reading, sandbox code/artifact creation, and memory save/recall, with 14 live sandbox isolation checks. Those earlier smoke results still need repeating against the merged release candidate.
 
 ## Decision

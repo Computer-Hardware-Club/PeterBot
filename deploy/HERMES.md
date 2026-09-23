@@ -1,5 +1,12 @@
 # Operating Hermes-backed Peter
 
+Current P910 deployment (September 23, 2026) uses the [dedicated worker VM](../docs/worker-vm.md),
+member work access, and private officer controls in `#officers` and `#testing`.
+See the [live release record](../docs/release-evidence.md) and
+[cutover runbook](../docs/p910-cutover.md) for current limits, image revisions,
+backups, and rollback. The pilot defaults below document the earlier Docker
+stage and must not be used as the live P910 configuration.
+
 Hermes is an immutable upstream source dependency, not a fork or submodule. The worker Dockerfile installs the pinned revision in `requirements-hermes.txt` using the upstream-required editable installation. Runtime root files remain read-only. Hermes streaming is explicitly disabled because Peter's capability proxy returns non-streamed completions; reasoning remains enabled. Do not update Hermes without the adapter tests and a real-model smoke test.
 
 ## Services and authority
@@ -12,48 +19,43 @@ Hermes is an immutable upstream source dependency, not a fork or submodule. The 
 
 The worker only receives a short-lived capability for its job. The gateway verifies the requester's current Discord roles/channel access on every model/tool request. Personal memory is isolated by guild and user; club memory is public and officer-writable. Record versions and immutable revisions support audit. Authority never comes from memory. No private officer knowledge store is enabled in this pilot.
 
-## Discord pilot
+## Discord member workflow
 
-Ordinary mentions are conversational: Peter answers in the original channel without creating a thread or showing task IDs/status messages. A short model turn decides whether tools are needed. If so, work runs quietly in the existing sandbox and the useful answer/files are returned as a reply to the original message. Shared-channel workers receive public club memory and same-requester context only; personal memory is unavailable, including ID-based updates/deletes. Social context from other speakers stays in the conversational turn and is not sent to sandbox tools.
+The current P910 configuration has member work enabled in its configured listen
+channels. Peter responds when named, mentioned, replied to, or addressed through
+a recent scoped follow-up. Bare greetings are answered locally. Ordinary
+questions get a conversational model turn; requests that need tools or promised
+files go to a disposable worker and return to the original message. The
+foreground scheduler queues competing turns and gives an honest wait notice.
 
-`officer_only: true` preserves the current tool pilot for configured officer role IDs. Member mentions and `/ask` keep the existing bounded conversational path. Explicit `/task` remains an optional private workspace, never the default for pings.
+`officer_only` in `deploy/hermes.example.json` is an earlier pilot default, not
+the current protected production value. Authorization still comes from current
+Discord identity, channel, and roles. Shared-channel work receives public club
+context and the requester's scoped context; private personal memory and task
+history do not flow into a public work request.
 
-- `/task prompt [attachment]`: start work in a new private, non-invitable task thread.
-- `/ask` stays a private conversational answer. Officer mentions use the conversational/tool-routing path above.
-- Private work is explicitly continued through `/continue_task`; ordinary thread messages are not automatically converted into tasks.
-- `/tasks`: list your task IDs and statuses.
-- `/cancel_task task_id`: revoke the task and request immediate container termination.
-- `/continue_task task_id prompt`: continue a finished/interrupted task in its original private thread.
-- `/memory scope query`: privately inspect personal/public club memory.
-- `/forget memory_id version`: remove an authorized memory from recall. Restricted audit revisions remain.
+- `/task prompt [attachment]` starts explicit work in a private task thread.
+- `/tasks`, `/continue_task`, and `/cancel_task` inspect, resume, or stop owned
+  work. A cancellation preserves valid files collected before teardown.
+- `/memory` and `/forget` inspect and remove authorized recall entries; audit
+  revisions remain.
+- `/ask`, `/recap`, `/suggest`, and `/remindme` remain available.
 
-For explicitly requested private tasks, Discord server administrators and members with Manage Threads may be able to access private threads; they are not confidential from server administration. Task ownership still prevents another user from taking over a task. The pilot accepts at most three UTF-8 text/code attachments totaling 128 KiB (one attachment in `/task`, multiple through mentions/follow-ups). Generated artifacts total at most 8 MiB. Images, Office/PDF uploads, arbitrary internet/package access, outbound messaging tools, server administration, native global memory/session search, cron and subagents are not exposed yet.
+Private task threads can still be visible to Discord server administrators and
+members with Manage Threads; task ownership prevents another member from
+continuing or cancelling one. The task accepts at most three UTF-8 text/code
+attachments totaling 128 KiB. Generated artifacts total at most 8 MiB. The
+Hermes worker does not receive general browser/network, Discord administration,
+cron, or subagent authority. Exact pinned PyPI wheels and crates.io crates are
+available only through the authenticated [dependency broker](../docs/dependency-access.md).
 
-One sandbox agent task runs at a time. At most two tasks per user and 20 globally may be pending. Default limits are 20 minutes per task, 30 Hermes iterations, 8192 tokens per response, and a total allocated output budget of 131072 tokens. Thinking is enabled by the trusted model proxy regardless of caller flags. These are independent of legacy member-chat budgets. `deploy/prepare_hermes_config.py` generates a bot config with the stable persona, thinking enabled for member chat too, a 4096-token response allowance and a 240-second legacy request limit. Preserve a backup before replacing production JSON.
-
-## Fast conversational turn
-
-The first model turn on a mention decides whether to answer or hand the request to the sandbox. That turn runs with thinking enabled, because the deployed reasoning model does not emit tool calls reliably without it, and its completion budget (4096, and never below that) leaves room for thinking as well as the answer. Thinking is billed against the same budget, so a 2k allowance truncates mid-thought and returns an empty answer.
-
-Reliability rules for that turn, all enforced in `conversation.py`:
-
-- A blank answer is retried once with thinking disabled, which is the reliably non-empty path, plus an instruction to answer plainly.
-- Two blank answers return a short human line. Members never see an internal error string from a model wobble.
-- A blank answer never starts sandbox work by itself: only an explicit handoff does.
-- A tool name or argument shape the fast model invented is treated as a handoff, not an error. The sandbox re-checks authority and honours only its own allowlist, so failing toward doing the work is the safe direction.
-- Only wall-clock that is actually left is spent: the turn honours `inference.timeout_seconds`, and the retry shares the remaining budget instead of getting a fresh one.
-- The deadline is sized for a reasoning model (420 seconds deployed). A hard question can spend minutes thinking before it emits a byte, and a shorter deadline turns that into a member-facing failure.
-- The thinking attempt is capped at `TOTAL_ATTEMPT_SECONDS` and holds back `RETRY_RESERVE_SECONDS` for the cheap retry, keeping at least half of what is left if the deadline is short. Attempts log their budget, so a slow turn is distinguishable from a dead one.
-- Requests stream, and a stream that goes quiet for `STREAM_IDLE_SECONDS` is treated as dead. Non-streamed, vLLM sends nothing until the whole completion is finished, so a total deadline cannot tell "still thinking" from "server gone" and always loses to a long turn.
-- The fast turn is told to decide promptly and hand off rather than attempt real work itself.
-
-Club facts come from `club-knowledge.md`, baked into the gateway image and loaded through `paths.knowledge_file`. The file must exist: a missing one fails config load rather than silently letting Peter answer club questions from guesses. Both the conversational turn and the sandbox persona receive the same excerpt.
-
-Sandbox model calls get their own deadline (up to 600 seconds, bounded by `job_timeout`). The session-wide client deadline is far too short for a reasoning model writing thousands of tokens.
-
-The worker sets an explicit `HERMES_API_CALL_STALE_TIMEOUT` (600 seconds) before it builds the agent. The trusted proxy answers non-streamed, and Hermes abandons a non-streamed call it has heard nothing from: the upstream floor for this model family is 180 seconds, while a 4k-token reasoning turn needs up to about 250 seconds before its first byte. Without the override, long tasks die as `model_failed` after the stale retry collides with the proxy's one-call-per-task lock. Setting it explicitly also prevents the run-budget calculation from halving it mid-job.
-
-A heavy task can still exceed the 20-minute job budget, because the deployed model decodes at roughly 15-20 tokens per second and a coding task spends minutes reasoning. That ends as an honest `timeout` with the artifacts collected, not as a model error. The same limit decides whether a member's long request should hand off early rather than be attempted in the conversational turn.
+One worker task runs at a time. At most two tasks per user and 20 globally may
+be pending. Defaults include a 20-minute task deadline, 30 Hermes iterations,
+8192 output tokens per model response, and a 131072-token task output budget.
+For the current conversation routing, tier budgets, retries, and live Qwen
+measurements, see [model latency](../docs/model-latency.md). Club facts come
+from `club-knowledge.md` and versioned officer updates; missing configured
+knowledge fails startup rather than making Peter guess.
 
 ## Presence: one message that becomes the answer
 
@@ -95,6 +97,9 @@ Three smoke scripts, in increasing distance from the sandbox:
 
 Note that a handoff for "who are the current club officers?" is correct: that answer needs the live roster tool, not the static knowledge file.
 
-For rollback, stop/remove only the new `peterbot` container, restore the saved Compose file, `.env`, and `config.production.json`, then recreate `peterbot` from the previous gateway image (currently `peterbot-hermes-gateway:088c670-flashnext-v2`). Stop the new runner after active workers are gone. Preserve new SQLite state for diagnosis or later reuse. The dedicated worker firewall may safely remain installed.
-
-This Docker pilot shares p910's kernel. Move execution to a dedicated VM before widening to general member access, arbitrary network/package downloads, or more privileged capabilities. Command allowlists and model instructions are not substitutes for OS/network isolation.
+For a later image switch or rollback, follow the
+[cutover runbook](../docs/p910-cutover.md). It requires a fresh verified state
+snapshot, protected copies of deployment config, one Discord gateway at a
+time, and reconciliation of uncertain delivery before any replay. The old
+same-host Docker pilot is a historical topology; current member work runs in
+the dedicated VM boundary.

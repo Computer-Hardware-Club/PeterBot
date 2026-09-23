@@ -11,10 +11,15 @@ from peterbot.context import (
     build_mention_context_bundle,
     load_mention_image_payloads,
     prompt_requires_strong_target,
+    split_for_discord,
 )
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "mention_scenarios.json"
+
+
+def test_discord_text_delivery_removes_em_dashes() -> None:
+    assert split_for_discord("done — file attached") == ["done, file attached"]
 
 
 def load_scenarios():

@@ -1,0 +1,8 @@
+<!-- Host-only control bridge between P910 and the peterbot-worker guest.
+     No <forward> (host-only: nothing reaches or leaves via any physical NIC),
+     no DHCP (static addressing only), no domain overlap with default/NAT. -->
+<network>
+  <name>virbr-ctl</name>
+  <bridge name='virbr-ctl'/>
+  <ip address='192.168.241.1' netmask='255.255.255.0'/>
+</network>

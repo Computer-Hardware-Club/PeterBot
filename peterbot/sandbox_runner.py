@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import hashlib
 import io
 import json
 import logging
@@ -19,16 +20,46 @@ from aiohttp import web
 
 LOG = logging.getLogger(__name__)
 MAX_STDERR = 32 * 1024
-MAX_REQUEST = 256 * 1024
+# A restored project is at most 8 MiB of bytes (10.7 MiB base64) plus bounded
+# prompt/attachments. Ordinary Discord attachments still cap at 128 KiB.
+MAX_REQUEST = 12 * 1024 * 1024
 MAX_RESULT = 128 * 1024
 MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 9 * 1024 * 1024
 MAX_FILES = 256
+SALVAGE_SECONDS = 10
 WORKER_LABEL = "io.peterbot.worker=hermes"
 WORKER_ERROR_CODES = frozenset({
     "invalid_request", "initialization_failed", "model_failed", "execution_failed",
     "result_invalid", "unknown",
 })
+
+
+@dataclass(frozen=True)
+class ResourceProfile:
+    """Bounded build-resource ceilings chosen by the operator at runner start.
+
+    Requests never influence these; a Rust release build legitimately needs more
+    than an answer-only chat turn, so the operator picks a profile instead of the
+    task widening its own container.
+    """
+    name: str
+    cpus: str
+    memory: str
+    pids: int
+    workspace_size: str
+    tmp_size: str
+
+
+# Fixed ceilings keep every profile inside the VM's declared budget. Sizes are
+# plain docker CLI scalars ([kmg]); byte suffixes would smuggle per-profile tuning.
+RESOURCE_PROFILES = {profile.name: profile for profile in (
+    ResourceProfile("small", "1", "1g", 96, "256m", "128m"),
+    ResourceProfile("standard", "2", "2g", 128, "512m", "256m"),
+    # rustc linking large crates peaks above 2g RSS; workspace holds target/.
+    ResourceProfile("build", "4", "4g", 192, "2g", "512m"),
+)}
+DEFAULT_RESOURCE_PROFILE = "standard"
 
 
 # Docker cp cannot collect live tmpfs mounts. Read through trusted in-container
@@ -53,6 +84,7 @@ class Settings:
     scope: str = "peterbot"
     concurrency: int = 2
     timeout: int = 1800
+    resource_profile: str = DEFAULT_RESOURCE_PROFILE
 
     def __post_init__(self):
         if len(self.token) < 24 or not self.token.isascii() or any(c.isspace() for c in self.token):
@@ -64,6 +96,8 @@ class Settings:
                 raise ValueError("Invalid runner network/scope")
         if not 1 <= self.concurrency <= 2 or not 1 <= self.timeout <= 1800:
             raise ValueError("Invalid runner limits")
+        if self.resource_profile not in RESOURCE_PROFILES:
+            raise ValueError("Unknown worker resource profile")
 
     @classmethod
     def from_env(cls):
@@ -74,7 +108,12 @@ class Settings:
             scope=os.getenv("PETERBOT_RUNNER_SCOPE", "peterbot"),
             concurrency=int(os.getenv("PETERBOT_RUNNER_CONCURRENCY", "2")),
             timeout=int(os.getenv("PETERBOT_RUNNER_TIMEOUT", "1800")),
+            resource_profile=os.getenv("PETERBOT_WORKER_PROFILE", DEFAULT_RESOURCE_PROFILE),
         )
+
+    @property
+    def profile(self) -> ResourceProfile:
+        return RESOURCE_PROFILES[self.resource_profile]
 
 
 def authorized(header: str, token: str) -> bool:
@@ -92,15 +131,22 @@ def normalize_job_id(value) -> str:
 
 def worker_args(settings: Settings, name: str) -> list[str]:
     """All container capabilities are fixed here, never taken from a request."""
+    profile = settings.profile
     return [
         "run", "--detach", "--name", name,
         "--label", WORKER_LABEL, "--label", f"io.peterbot.runner={settings.scope}",
+        "--label", f"io.peterbot.profile={profile.name}",
         "--user", "10000:10000", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges:true", "--read-only",
-        "--pids-limit", "128", "--cpus", "2", "--memory", "2g", "--memory-swap", "2g",
+        "--pids-limit", str(profile.pids), "--cpus", profile.cpus,
+        "--memory", profile.memory, "--memory-swap", profile.memory,
         "--network", settings.network, "--dns", "127.0.0.1",
-        "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,uid=10000,gid=10000,mode=1777",
-        "--tmpfs", "/workspace:rw,nosuid,nodev,size=512m,uid=10000,gid=10000,mode=700",
+        # Docker defaults tmpfs to noexec. /tmp stays noexec (scratch only);
+        # /workspace gets an explicit `exec` so a coding worker can run the
+        # binaries it just compiled. nosuid/nodev still hold; nothing here can
+        # escape the tmpfs or reach host files.
+        "--tmpfs", f"/tmp:rw,nosuid,nodev,noexec,size={profile.tmp_size},uid=10000,gid=10000,mode=1777",
+        "--tmpfs", f"/workspace:rw,nosuid,nodev,exec,size={profile.workspace_size},uid=10000,gid=10000,mode=700",
         "--workdir", "/workspace", "--env", "HOME=/workspace", "--env", "TMPDIR=/tmp",
         "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "HERMES_HOME=/tmp/hermes",
         "--log-driver", "none", "--entrypoint", "python", settings.image,
@@ -256,6 +302,12 @@ def encode_artifacts(files: dict[str, bytes]) -> list[dict[str, str]]:
             for name, data in files.items()]
 
 
+def encode_project_files(files: dict[str, bytes]) -> list[dict[str, str]]:
+    """Keep the original safe file map for a durable scoped project manifest."""
+    return [{"name": name, "data_base64": base64.b64encode(data).decode("ascii"),
+             "sha256": hashlib.sha256(data).hexdigest()} for name, data in files.items()]
+
+
 @dataclass
 class Job:
     name: str
@@ -319,21 +371,57 @@ class Runner:
         if status == "failed":
             LOG.warning("Worker reported failure phase=worker_result error_code=%s", error_code or "unspecified")
         # Missing artifacts is normal; malformed or excessive artifacts fail closed.
-        job.phase = "artifacts_copy"
-        try:
-            archive = await docker(["exec", job.name, "/bin/tar", "-C", "/workspace", "-cf", "-", "--", "artifacts"],
-                                   max_bytes=MAX_ARCHIVE_BYTES)
-        except RunnerError as exc:
-            LOG.warning("Worker artifacts unavailable phase=%s error_type=%s", job.phase, type(exc).__name__)
-            artifacts = []
-        else:
-            job.phase = "artifacts_parse"
-            artifacts = encode_artifacts(safe_tar_files(archive))
-        response = {"status": status, "answer": result["answer"][:65536], "artifacts": artifacts}
+        artifacts, project_files = await self.collect_artifacts(job, best_effort=False)
+        response = {"status": status, "answer": result["answer"][:65536],
+                    "artifacts": artifacts, "project_files": project_files}
         if status == "failed" and error_code is not None:
             response["error_code"] = error_code
         job.phase = "complete"
         return response
+
+    async def collect_artifacts(self, job: Job, *, best_effort: bool) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Snapshot /workspace/artifacts through trusted in-container tar.
+
+        Copy failures are always empty (missing artifacts is normal). Parse
+        failures fail closed on the completed path but not while salvaging a
+        timed-out/cancelled task, where partial output still matters.
+        """
+        job.phase = "artifacts_copy"
+        try:
+            archive = await docker(["exec", job.name, "/bin/tar", "-C", "/workspace", "-cf", "-", "--", "artifacts"],
+                                   max_bytes=MAX_ARCHIVE_BYTES)
+        except (RunnerError, asyncio.TimeoutError, OSError) as exc:
+            LOG.warning("Worker artifacts unavailable phase=%s error_type=%s", job.phase, type(exc).__name__)
+            return [], []
+        if best_effort:
+            try:
+                job.phase = "artifacts_parse"
+                files = safe_tar_files(archive)
+                return encode_artifacts(files), encode_project_files(files)
+            except RunnerError:
+                return [], []
+        job.phase = "artifacts_parse"
+        files = safe_tar_files(archive)
+        return encode_artifacts(files), encode_project_files(files)
+
+    async def salvage(self, job: Job) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Collect bounded partial artifacts before teardown after a stop event.
+
+        Shielded because the surrounding handler task is already cancelled or
+        past its deadline; a lost snapshot is acceptable, a hung salvage is not.
+        """
+        task = asyncio.create_task(asyncio.wait_for(self.collect_artifacts(job, best_effort=True), SALVAGE_SECONDS))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                return await task
+            except (asyncio.CancelledError, asyncio.TimeoutError, RunnerError, OSError):
+                task.cancel()
+                return [], []
+        except (asyncio.TimeoutError, RunnerError, OSError):
+            return [], []
+
 
     async def run(self, request):
         body = await read_body(request)
@@ -352,9 +440,14 @@ class Runner:
             result = await asyncio.wait_for(self.execute(job, body["request"]), self.settings.timeout)
         except asyncio.TimeoutError:
             LOG.warning("Worker task timed out phase=%s", job.phase)
-            result = {"status": "timeout", "answer": "Task reached its execution limit.", "artifacts": []}
+            # Salvage valid partial output before teardown (PETER-14 partial artifact gate).
+            artifacts, project_files = await self.salvage(job)
+            result = {"status": "timeout", "answer": "Task reached its execution limit.",
+                      "artifacts": artifacts, "project_files": project_files}
         except asyncio.CancelledError:
-            result = {"status": "cancelled", "answer": "Task cancelled.", "artifacts": []}
+            artifacts, project_files = await self.salvage(job)
+            result = {"status": "cancelled", "answer": "Task cancelled.",
+                      "artifacts": artifacts, "project_files": project_files}
         except Exception as exc:
             # Container output, request data, and exception strings may contain secrets.
             LOG.warning("Worker task failed phase=%s error_type=%s", job.phase, type(exc).__name__)

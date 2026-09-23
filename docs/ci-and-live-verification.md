@@ -1,6 +1,10 @@
 # CI and live verification
 
-`feat/hermes-peter` contains the bounded-agent-harness commit `58d8935`; it also adds the Hermes gateway, worker, runner, scoped memory, queue, and conversation routing. Keep the two existing draft PRs for review until their maintainers choose a merge or supersession order. New changes to the Hermes implementation should be based on its current head, not the older `main` commit.
+The release history is stacked: bounded web tools first, then the Hermes gateway,
+runner, and worker, followed by Peter's foreground conversation and club-member
+workflows. The CI workflow validates pushes to `main` and feature branches as
+well as pull requests. Passing CI proves deterministic behavior and image
+construction; live Discord, Qwen, and VM verification remain separate gates.
 
 ## Local deterministic baseline
 

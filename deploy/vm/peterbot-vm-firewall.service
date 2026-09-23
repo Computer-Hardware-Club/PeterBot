@@ -1,0 +1,16 @@
+[Unit]
+Description=PeterBot worker guest egress wall (worker subnet -> broker alias only)
+# Install the default-deny jump before Docker can start containers. A Docker
+# ExecStartPost drop-in re-applies it at position 1 after daemon restarts.
+After=network-online.target
+Wants=network-online.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/peterbot-vm-firewall
+ExecReload=/usr/local/bin/peterbot-vm-firewall
+
+[Install]
+WantedBy=multi-user.target

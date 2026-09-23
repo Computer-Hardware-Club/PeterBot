@@ -71,8 +71,8 @@
     "max_response_chars": 6000,
     "max_prompt_chars": 4000,
     "max_concurrent": 2,
-    "user_requests_per_minute": 3,
-    "guild_requests_per_minute": 15,
+    "user_requests_per_minute": 20,
+    "guild_requests_per_minute": 120,
     "allowed_guild_ids": [],
     "allow_dms": false,
     "vision_enabled": true

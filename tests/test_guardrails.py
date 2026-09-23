@@ -1,4 +1,6 @@
 import pytest
+import json
+from pathlib import Path
 
 from peterbot.guardrails import GuardLimits, RequestGuard
 
@@ -95,6 +97,18 @@ def test_user_quota_spans_guilds_and_release_does_not_reset_it():
     assert not complete(guard, guild=30)[0]
     assert 30 not in guard._guild_requests
     assert request(guard, user=2, guild=30)[0]
+
+
+def test_configured_quota_does_not_cut_off_ordinary_rapid_chat():
+    config = json.loads((Path(__file__).parents[1] / "config.json").read_text())
+    agent = config["agent"]
+    guard = RequestGuard(GuardLimits(
+        user_requests_per_minute=agent["user_requests_per_minute"],
+        guild_requests_per_minute=agent["guild_requests_per_minute"],
+    ))
+    for _ in range(20):
+        assert complete(guard)[0]
+    assert not complete(guard)[0]
 
 
 def test_guild_quota_spans_users_and_does_not_consume_rejected_user_quota():

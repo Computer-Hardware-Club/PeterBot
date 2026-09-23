@@ -118,6 +118,8 @@ def run_checks(environ=None):
     exposed = [path for path in FORBIDDEN_PATHS if accessible(path)]
     record("no_host_credentials_or_docker_socket", not exposed, accessible_paths=exposed)
     record("root_write_denied", not probe_write("/"))
+    # The pinned rustc/cargo/node toolchain is trusted image content: read-only like /app.
+    record("toolchain_write_denied", not probe_write("/usr/local/bin"))
     record("workspace_write_allowed", probe_write("/workspace"))
 
     try:
