@@ -1,5 +1,12 @@
 # Operating Hermes-backed Peter
 
+Current P910 deployment (September 23, 2026) uses the [dedicated worker VM](../docs/worker-vm.md),
+member work access, and private officer controls in `#officers` and `#testing`.
+See the [live release record](../docs/release-evidence.md) and
+[cutover runbook](../docs/p910-cutover.md) for current limits, image revisions,
+backups, and rollback. The pilot defaults below document the earlier Docker
+stage and must not be used as the live P910 configuration.
+
 Hermes is an immutable upstream source dependency, not a fork or submodule. The worker Dockerfile installs the pinned revision in `requirements-hermes.txt` using the upstream-required editable installation. Runtime root files remain read-only. Hermes streaming is explicitly disabled because Peter's capability proxy returns non-streamed completions; reasoning remains enabled. Do not update Hermes without the adapter tests and a real-model smoke test.
 
 ## Services and authority
