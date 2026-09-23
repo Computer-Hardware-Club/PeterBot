@@ -118,8 +118,7 @@ modes. The non-thinking research sample also routed correctly, but one sample do
 not overturn the earlier live no-thinking failures, so deep keeps thinking per the
 PETER-05 brief.
 
-The raw JSONL probe outputs were retained locally during release verification
-under `/tmp/peterbot-latency-{greeting,work,coding-none}.jsonl`; they contain
-timing and token metrics but no prompts or reasoning text. The first two runs
-preceded the explicit-work profile change. The non-thinking coding run was an
-isolated compatibility/latency test before that profile was deployed.
+The [raw JSONL probe results](evidence/latency-2026-09-23.jsonl) contain timing
+and token metrics but no prompts or reasoning text. The first two runs preceded
+the explicit-work profile change. The non-thinking coding run was an isolated
+compatibility/latency test before that profile was deployed.
