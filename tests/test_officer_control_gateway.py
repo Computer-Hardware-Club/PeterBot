@@ -157,6 +157,24 @@ def test_officer_can_change_and_undo_a_fact_in_private_testing(tmp_path):
     asyncio.run(scenario())
 
 
+def test_officer_model_correction_in_testing_gets_runtime_answer_without_a_write(tmp_path):
+    gateway, guild, channels, _bot = make(tmp_path)
+
+    async def scenario():
+        request = message(guild, channels[22],
+                          'set public club fact model_name to Claude', source=550)
+        assert await gateway.handle_control_message(request, request.content)
+        assert request.sent == ['yeah, qwen under the hood. i get that from my config, so it stays current']
+        assert gateway.club.current(10)['version'] == 0
+        denied = message(guild, channels[22],
+                         'set public club fact model_name to Claude', user_id=2, source=551)
+        with pytest.raises(PolicyDenied):
+            await gateway.handle_control_message(denied, denied.content)
+        await gateway.close()
+
+    asyncio.run(scenario())
+
+
 def test_announcement_uses_bound_receipt_and_rechecks_revoked_role(tmp_path):
     gateway, guild, channels, bot = make(tmp_path)
 

@@ -5,7 +5,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -61,6 +61,24 @@ def test_bare_greeting_uses_no_model_or_worker(tmp_path):
             assert message.reply.await_args.args[0] == 'yo'
             gateway.conversational_reply.assert_not_awaited()
             gateway.submit.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+def test_saved_club_memory_reaches_chat_without_personal_memory(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, _):
+            officer = Principal(10, 1, 20, (100,))
+            gateway.memory.create(officer, scope='club',
+                                  content='The soldering workshop moved to Thursday.',
+                                  source_message_id=31)
+            gateway.memory.create(officer, scope='personal',
+                                  content='private secret', source_message_id=32)
+            with patch('peterbot.conversation.reply_or_use_tools',
+                       new=AsyncMock(return_value='Thursday.')) as model:
+                await gateway.conversational_reply(officer, 'when is soldering?', [], audience='public')
+            notes = model.await_args.kwargs['club_notes']
+            assert 'soldering workshop moved to Thursday' in notes
+            assert 'private secret' not in notes
     asyncio.run(scenario())
 
 

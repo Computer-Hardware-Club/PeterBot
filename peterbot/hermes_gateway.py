@@ -213,12 +213,15 @@ class HermesGateway:
             user_id=principal.user_id, channel_id=principal.channel_id, audience=audience)
         facts, _version = self.club.chat_context(principal.guild_id, prompt[:300],
                                                  static_chunks=self.knowledge.chunks)
+        notes = self.memory.search(principal, scope='club', limit=8)
+        club_notes = '\n'.join(row['content'][:400] for row in notes)[:1600]
         style = self.style.current(principal.guild_id)
         voice = self.style.instruction(principal.guild_id) if style['version'] else ''
         try:
             answer = await reply_or_use_tools(self.session,self.config,principal,prompt,saved + context,
                                               knowledge_chunks=self.knowledge.chunks,
-                                              club_context=facts, style_instruction=voice,
+                                              club_context=facts, club_notes=club_notes,
+                                              style_instruction=voice,
                                               has_attachments=has_attachments,
                                               budget_seconds=budget_seconds)
             outcome = 'ok'
@@ -301,10 +304,16 @@ class HermesGateway:
                                         expected_version=version)
             receipt = f"Undid the latest {request.action.replace('_', ' ')} change (v{result['version']})."
         elif request.action == 'club_fact':
-            version = self.club.current(p.guild_id)['version']
-            result = self.club.set_fact(p, intent, channel_is_private=private,
-                expected_version=version, **request.payload)
-            receipt = f"Updated {request.payload['visibility']} club fact `{request.payload['key']}` (v{result['version']})."
+            if request.payload.get('runtime_identity'):
+                from .conversation import runtime_model_answer
+                current_model = runtime_model_answer(self.config)
+                receipt = (f"yeah, {current_model}. i get that from my config, so it stays current"
+                           if current_model else "i can't verify my current model right now")
+            else:
+                version = self.club.current(p.guild_id)['version']
+                result = self.club.set_fact(p, intent, channel_is_private=private,
+                    expected_version=version, **request.payload)
+                receipt = f"Updated {request.payload['visibility']} club fact `{request.payload['key']}` (v{result['version']})."
         elif request.action == 'roster':
             if request.payload.get('ambiguous'):
                 receipt = request.payload['ambiguous']

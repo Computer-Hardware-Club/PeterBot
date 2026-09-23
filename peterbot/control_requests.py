@@ -33,6 +33,16 @@ _FACT = re.compile(
     re.IGNORECASE,
 )
 _ANNOUNCE = re.compile(r"(?:announce|post)\s+(?:in|to)\s+<#(?P<target>\d{1,20})>\s*[:,-]?\s*(?P<content>.+)", re.IGNORECASE)
+_IDENTITY_KEY = re.compile(
+    r"^(?:model|model_name|running_model|peter_model|llm|ai_model|runtime_model|under_the_hood)$",
+    re.IGNORECASE)
+
+
+def _is_model_identity_fact(key: str) -> bool:
+    """Only keys about Peter's own runtime are operator settings, not club facts."""
+    return bool(_IDENTITY_KEY.match(key))
+
+
 _UNDO = re.compile(r"undo\s+(?:the\s+)?(?:last\s+)?(?P<kind>club fact|fact|roster|style)\s*", re.IGNORECASE)
 _STYLE_START = re.compile(r"(?:be|sound|speak|talk|keep|make your replies|write)\b", re.IGNORECASE)
 _STYLE_WORD = re.compile(r"\b(?:formal|casual|verbose|brief|short|humor|funny|reserved|quiet|chatty|serious)\b", re.IGNORECASE)
@@ -56,8 +66,14 @@ def parse_control_request(message_text: str, *, bot_user_id: int | None = None) 
         text = re.sub(rf"^<@!?{bot_user_id}>[,:]?\s+", '', text, count=1).strip()
     text = _PREFIX.sub('', text, count=1).strip()
     if match := _FACT.fullmatch(text):
+        key = match['key'].lower()
+        value = match['value'].strip()
+        if _is_model_identity_fact(key):
+            # Keep the officer's source-bound control request so the gateway
+            # can acknowledge the live runtime value without storing stale data.
+            return ControlRequest('club_fact', {'runtime_identity': True})
         return ControlRequest('club_fact', {
-            'key': match['key'].lower(), 'value': match['value'].strip(),
+            'key': key, 'value': value,
             'visibility': match['visibility'].lower(),
         })
     if match := _ANNOUNCE.fullmatch(text):
