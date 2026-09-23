@@ -96,6 +96,8 @@ def test_output_shape_and_known_digits(binary):
 
 WORKER_DOCKERFILE = (ROOT / "docker/Dockerfile.hermes-worker").read_text()
 FIREWALL = (ROOT / "deploy/vm/peterbot-vm-firewall.sh").read_text()
+HOST_WALL = (ROOT / "deploy/hermes-firewall.sh").read_text()
+HOST_WALL_UNIT = (ROOT / "deploy/peterbot-worker-firewall.service").read_text()
 FIREWALL_UNIT = (ROOT / "deploy/vm/peterbot-vm-firewall.service").read_text()
 VERIFY = (ROOT / "deploy/vm/peterbot-worker-vm-verify.sh").read_text()
 PROVISION = (ROOT / "deploy/vm/peterbot-worker-vm-provision.sh").read_text()
@@ -155,6 +157,13 @@ def test_broker_alias_is_reserved_and_checked_as_an_exact_host_address():
     assert "--ip-range 192.168.240.128/25" in SETUP
     assert '$4 == "192.168.240.2/32"' in FIREWALL
     assert '$4 == "192.168.240.2/32"' in VERIFY
+
+
+def test_host_docker_forward_rule_allows_only_guest_to_original_broker_port():
+    """Docker DNAT needs a scoped DOCKER-USER allow before p910's final DROP."""
+    assert "-I DOCKER-USER 1 -i virbr-ctl -s 192.168.241.2/32 -p tcp" in HOST_WALL
+    assert "--ctorigdst 192.168.241.1 --ctorigdstport 8770 -j ACCEPT" in HOST_WALL
+    assert "PartOf=docker.service" in HOST_WALL_UNIT
 
 
 def test_worker_subnet_bridge_and_setup_stay_identical():

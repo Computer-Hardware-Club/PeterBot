@@ -223,12 +223,14 @@ runtime uid) plus `virbr-ctl`.
      `PETERBOT_ISOLATION_HOST_GATEWAY=192.168.241.1`,
      `PETERBOT_ISOLATION_INFERENCE_HOST=100.73.210.66`,
      `PETERBOT_ISOLATION_P910_HOST=100.99.6.59`.
-   - P910 host gate: its UFW INPUT policy is DROP. A persistent narrow rule now
-     allows only TCP from `192.168.241.2` on `virbr-ctl` to
-     `192.168.241.1:8770` (`ufw allow in on virbr-ctl from 192.168.241.2 to
-     192.168.241.1 port 8770 proto tcp comment PeterBot-VM-broker`). The
-     synthetic-listener smoke proved this path; the final test repeats it
-     against Peter's actual authenticated broker after the gateway cutover.
+   - P910 host gate: UFW INPUT defaults to DROP. Its narrow persistent rule
+     accepts only `192.168.241.2` on `virbr-ctl` to `192.168.241.1:8770`.
+     Docker publishes that port by DNAT into the gateway container, so those
+     packets instead reach FORWARD/DOCKER-USER; `deploy/hermes-firewall.sh`
+     also inserts a narrow allow keyed to the same guest source, interface,
+     and conntrack **original** host destination/port before the host's final
+     Docker drop. The systemd unit reapplies it on Docker restart. The
+     real-gateway smoke then proved 31/31 checks including broker 401.
 
 Posture B (no internet at all in the guest): after first boot,
 `virsh detach-device peterbot-worker <vnic1.xml>` and remove the NAT interface
