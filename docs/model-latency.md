@@ -75,6 +75,11 @@ usage, retries, and route validity (never prompt or reasoning text). `--metrics-
 samples `vllm:num_requests_running/waiting` and KV usage around each row so loaded
 samples cannot masquerade as idle ones.
 
+The September 23 voice update answers a **bare greeting** locally after trusted
+Discord admission, with `yo` or `whats good` and no model call. The greeting
+probe below remains a dated measurement of the previous model-routed path;
+ordinary questions still use the tiered model path.
+
 ### Compatibility (server lightly loaded — running=1: compatibility only, not warm-idle latency)
 
 2026-09-23 ~04:20 UTC, host 100.73.210.66:8000, one repeat per row, retries 0,

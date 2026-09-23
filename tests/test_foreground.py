@@ -145,8 +145,11 @@ def test_ack_delivery_failure_does_not_abort_or_duplicate_the_queued_request(tmp
     ack_attempts = []
     ran = []
     gate = asyncio.Event()
+    first_started = asyncio.Event()
+    ack_seen = asyncio.Event()
 
     async def hold_first():
+        first_started.set()
         await gate.wait()
         return 'first'
 
@@ -157,16 +160,17 @@ def test_ack_delivery_failure_does_not_abort_or_duplicate_the_queued_request(tmp
 
     async def broken_ack(position):
         ack_attempts.append(position)
+        ack_seen.set()
         raise RuntimeError('interaction expired')
 
     async def scenario():
         first = asyncio.create_task(chat(sched, 1, 240, hold_first, total_timeout=5))
-        await asyncio.sleep(0.03)
+        await asyncio.wait_for(first_started.wait(), timeout=5)
         second = asyncio.create_task(sched.run_one(
             kind='chat', guild_id=10, user_id=2, channel_id=20,
             source_message_id=241, work=slow_answer,
             acknowledge=broken_ack, total_timeout=5))
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(ack_seen.wait(), timeout=5)
         assert ack_attempts == [1]
         gate.set()
         await asyncio.wait_for(first, timeout=5)
