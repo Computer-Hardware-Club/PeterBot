@@ -686,6 +686,34 @@ def test_private_task_status_message_becomes_final_answer(tmp_path):
     asyncio.run(scenario())
 
 
+def test_private_followup_edits_its_status_instead_of_leaving_a_stale_notice(tmp_path):
+    async def scenario():
+        async with task_gateway(tmp_path) as gateway:
+            gateway.thread.released.set()
+            first = gateway.jobs.create(guild_id=10, user_id=1, channel_id=21,
+                source_message_id=330, prompt='Make counter.py')
+            gateway.jobs.update(first['id'], status='completed', answer='Printed 42.',
+                                delivered=True)
+            followup = await gateway.submit(guild_id=10, user_id=1,
+                channel=gateway.thread, source_message_id=331,
+                prompt='Change it to 43', parent_id=first['id'])
+            assert followup['status_message_id'] is None
+            gateway.thread.fetch_message = AsyncMock(
+                side_effect=lambda _id: gateway.thread.messages[0])
+            gateway.session.result = {'status': 'completed', 'answer': 'Updated counter.py.',
+                                      'artifacts': []}
+            await gateway.queue_tick()
+            while gateway.active:
+                await asyncio.sleep(0.01)
+            await gateway.queue_tick()
+            notice = gateway.thread.messages[0]
+            assert gateway.jobs.get(followup['id'])['status_message_id'] == notice.id
+            assert notice.edit.await_args.kwargs['content'] == 'Updated counter.py.'
+            assert 'Updated counter.py.' not in gateway.thread.sent
+            assert gateway.jobs.get(followup['id'])['delivery_status'] == 'delivered'
+    asyncio.run(scenario())
+
+
 def test_members_can_chat_before_work_execution_rollout_but_cannot_submit(tmp_path):
     async def scenario():
         async with task_gateway(tmp_path, officer_only=False) as gateway:

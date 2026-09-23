@@ -65,6 +65,8 @@ def test_real_runtime_contract_thinking_privacy_and_cleanup(prepared):
     assert agent._skip_mcp_refresh and agent._persist_disabled
     assert '"user_id": "123"' in agent.conversation_kwargs["system_message"]
     assert "secret-job-capability" not in agent.conversation_kwargs["system_message"]
+    assert "trusted gateway attaches saved artifact files" in agent.conversation_kwargs["system_message"]
+    assert "never tell the user to fetch a sandbox path" in agent.conversation_kwargs["system_message"]
     assert agent.kwargs["max_iterations"] == 30 and agent.kwargs["max_tokens"] == 8192
     assert json.loads((prepared / "home/config.yaml").read_text())["plugins"]["enabled"] == []
     assert json.loads((prepared / "home/config.yaml").read_text())["model"]["streaming"] is False

@@ -1196,7 +1196,11 @@ class HermesGateway:
                 'max_iterations':self.settings.max_iterations,'max_tokens':self.settings.max_tokens}}
             channel = await self.bot.fetch_channel(job['channel_id'])
             if not conversational and not job.get('status_message_id'):
-                await channel.send('I’ll take a look.',allowed_mentions=discord.AllowedMentions.none())
+                notice = await channel.send('I’ll take a look.',
+                    allowed_mentions=discord.AllowedMentions.none())
+                if type(getattr(notice, 'id', None)) is int:
+                    self.jobs.update(job['id'], status_message_id=notice.id)
+                    job = {**job, 'status_message_id': notice.id}
             progress = None
             if job.get('status_message_id'):
                 progress = asyncio.create_task(self.report_progress(job))
