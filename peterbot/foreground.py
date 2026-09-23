@@ -620,7 +620,7 @@ class ForegroundScheduler:
                     # carries its own handler deadline.
                     self.request_cancel(request_id)
                     raise asyncio.TimeoutError('the foreground queue did not reach your request in time')
-                if acknowledge is not None and not acked \
+                if acknowledge is not None and not acked and state['status'] == QUEUED \
                         and self.clock() - started_waiting >= self.ack_after:
                     acked = True
                     # Attempted-once is recorded BEFORE delivery: a queue ack is

@@ -119,14 +119,36 @@ def test_queued_request_gets_one_deterministic_ack_and_no_work(tmp_path):
     assert len(acks) == 1             # never retried
 
 
-def test_ack_delivery_failure_does_not_abort_or_duplicate_the_request(tmp_path):
-    """A queue ack is best-effort transport. If the Discord send raises (e.g.
-    the interaction expired) the turn already dispatched under the slot must
-    still complete exactly once and return its answer; the ack is never
-    retried, and the requester is never forced to ask again."""
+def test_running_chat_uses_typing_without_a_false_queue_ack(tmp_path):
+    sched = make(tmp_path, ack_after=0.01, poll=0.01)
+    acks = []
+
+    async def slow_answer():
+        await asyncio.sleep(0.08)
+        return 'the answer'
+
+    async def acknowledge(position):
+        acks.append(position)
+
+    row, value = asyncio.run(sched.run_one(
+        kind='chat', guild_id=10, user_id=1, channel_id=20,
+        source_message_id=240, work=slow_answer, acknowledge=acknowledge,
+        total_timeout=5))
+    assert value == 'the answer'
+    assert row['status'] == 'done' and row['acked'] == 0
+    assert acks == []
+
+
+def test_ack_delivery_failure_does_not_abort_or_duplicate_the_queued_request(tmp_path):
+    """A failed queue ack is attempted once and never aborts the later turn."""
     sched = make(tmp_path, ack_after=0.01, poll=0.01)
     ack_attempts = []
     ran = []
+    gate = asyncio.Event()
+
+    async def hold_first():
+        await gate.wait()
+        return 'first'
 
     async def slow_answer():
         ran.append(True)
@@ -138,10 +160,17 @@ def test_ack_delivery_failure_does_not_abort_or_duplicate_the_request(tmp_path):
         raise RuntimeError('interaction expired')
 
     async def scenario():
-        return await asyncio.wait_for(
-            sched.run_one(kind='chat', guild_id=10, user_id=1, channel_id=20,
-                          source_message_id=241, work=slow_answer,
-                          acknowledge=broken_ack, total_timeout=5), timeout=5)
+        first = asyncio.create_task(chat(sched, 1, 240, hold_first, total_timeout=5))
+        await asyncio.sleep(0.03)
+        second = asyncio.create_task(sched.run_one(
+            kind='chat', guild_id=10, user_id=2, channel_id=20,
+            source_message_id=241, work=slow_answer,
+            acknowledge=broken_ack, total_timeout=5))
+        await asyncio.sleep(0.05)
+        assert ack_attempts == [1]
+        gate.set()
+        await asyncio.wait_for(first, timeout=5)
+        return await asyncio.wait_for(second, timeout=5)
 
     row, value = asyncio.run(scenario())
     assert value == 'the answer'
