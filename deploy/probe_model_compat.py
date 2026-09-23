@@ -46,9 +46,11 @@ def measure(url: str, model: str, api_key: str, mode: str, case: str,
         headers["Authorization"] = "Bearer " + api_key
     start = time.monotonic()
     first = None
+    first_answer = None
     finish = None
     text = []
     tool_names = []
+    tool_arguments: dict[int, str] = {}
     usage = {}
     malformed = 0
     response = request.Request(url.rstrip("/") + "/chat/completions",
@@ -77,19 +79,34 @@ def measure(url: str, model: str, api_key: str, mode: str, case: str,
                 if delta.get("content"):
                     text.append(delta["content"])
                 for call in delta.get("tool_calls") or []:
+                    index = call.get("index", 0)
                     name = (call.get("function") or {}).get("name")
                     if name:
                         tool_names.append(name)
+                    arguments = (call.get("function") or {}).get("arguments")
+                    if arguments:
+                        tool_arguments[index] = tool_arguments.get(index, "") + arguments
+                if first_answer is None and (delta.get("content") or delta.get("tool_calls")):
+                    first_answer = time.monotonic() - start
                 if first is None and (delta.get("content") or delta.get("reasoning")
                                       or delta.get("reasoning_content") or delta.get("tool_calls")):
                     first = time.monotonic() - start
     except (error.HTTPError, error.URLError, TimeoutError) as exc:
         return {"case": case, "mode": mode, "error_type": type(exc).__name__,
                 "status": getattr(exc, "code", None), "seconds": round(time.monotonic() - start, 3)}
+    valid_tools = 0
+    for arguments in tool_arguments.values():
+        try:
+            parsed = json.loads(arguments)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("reason"), str):
+            valid_tools += 1
     return {"case": case, "mode": mode, "first_token_s": round(first, 3) if first else None,
+            "first_answer_s": round(first_answer, 3) if first_answer else None,
             "seconds": round(time.monotonic() - start, 3), "finish_reason": finish,
             "answer_chars": len("".join(text)), "tool_names": list(dict.fromkeys(tool_names)),
-            "malformed_chunks": malformed, "usage": usage}
+            "valid_tool_arguments": valid_tools, "malformed_chunks": malformed, "usage": usage}
 
 
 def main() -> None:
