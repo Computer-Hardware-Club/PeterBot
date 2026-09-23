@@ -52,6 +52,9 @@ def test_clean_promise_cannot_replace_requested_execution_or_attachment(prompt):
     result, calls = run({'content': 'Got it — sending the files now.'}, prompt)
     assert result is None
     assert len(calls) == 1
+    assert calls[0][1]['json']['chat_template_kwargs'] == {'enable_thinking': False}
+    assert calls[0][1]['json']['max_tokens'] == 512
+    assert 'reasoning_effort' not in calls[0][1]['json']
 
 
 def test_conceptual_coding_question_can_still_get_a_direct_answer():

@@ -18,8 +18,11 @@ attachment or sandbox execution; that request is handed to the worker instead.
 | normal | explain/compare/how-does style questions, long or multi-`?` messages | on | 2048 | 1024 | low |
 | deep | current facts, research, code/files/club-state verbs, attachments, explicit depth requests | on | 4096 (follows `inference.max_tokens`, clamped 4096–8192) | 2048 | low |
 
-- Thinking stays **on** for normal/deep: earlier live notes report unreliable tool
-  routing without thinking, and a handoff must remain reachable from any tier.
+- Thinking stays **on** for normal/deep research and ambiguous work. An explicit
+  request to attach files or execute code in the sandbox uses a 512-token
+  non-thinking first attempt. Five idle coding probes all made valid tool calls
+  with p95 2.462 s, versus 44.173 s with thinking. The clean-text postcondition
+  still sends such a request to the worker.
 - `reasoning_effort` is only ever sent together with `enable_thinking: true`;
   the served vLLM build rejects the combination otherwise. A capped thinking budget
   therefore always pairs with an effort value.
@@ -84,7 +87,28 @@ malformed chunks 0.
 | research | none | handoff (handoff) ✓ | 1.36 | 3.75 | 68/0 | tool_calls | 1 |
 | research | low | handoff (handoff) ✓ | 2.97 | 5.08 | 114/42 | tool_calls | 1 |
 
-### Idle warm p50/p95 — DEFERRED
+### Idle warm p50/p95
+
+On September 23, five repetitions per case used the deployed
+`Qwen3.8-Flash-Next` vLLM endpoint and sampled its running/waiting gauges
+before every request. All samples began with 0 running and 0 waiting. The
+first useful signal is the first answer token or tool-call delta; total time
+includes completion and transport. No row retried, failed routing, or contained
+a malformed stream chunk.
+
+| case | thinking | valid route | first useful p50/p95 | total p50/p95 | completion tokens, range |
+| --- | --- | --- | --- | --- | --- |
+| greeting | off | 5/5 answer | 1.270 / 1.295 s | 2.007 / 2.028 s | 21–33 |
+| factual | low | 5/5 answer | 1.857 / 1.944 s | 3.079 / 3.387 s | 86–131 |
+| research | low | 5/5 handoff | 2.462 / 2.598 s | 3.550 / 3.765 s | 86–115 |
+| coding, previous shape | low | 5/5 handoff | 13.347 / 43.085 s | 14.441 / 44.173 s | 529–1998 |
+| coding, explicit-work shape | off | 5/5 handoff | 1.469 / 1.483 s | 2.398 / 2.462 s | 48–57 |
+
+The proposed banter target was p50 ≤2 s, p95 ≤5 s: measured p50 missed by
+0.007 s while p95 passed. Factual p95 was under the proposed 15 s. Research
+and explicit coding handoffs were under the usual 5 s and 8 s cutoff proposals
+in these five samples. These are model-only timings, excluding Discord delivery,
+queue delay, and worker execution; they are not service-level guarantees.
 
 Accepted control surface, verified against the served build: `enable_thinking`
 false/true, `reasoning_effort=low` **with** thinking, and
@@ -94,7 +118,8 @@ modes. The non-thinking research sample also routed correctly, but one sample do
 not overturn the earlier live no-thinking failures, so deep keeps thinking per the
 PETER-05 brief.
 
-Local agents hold the server during this pass; per coordination notes, warm-idle
-p50/p95 is left for Codex after all agents finish, with
-`--repeat 5 --metrics-url http://<host>:8000/metrics` while the dashboard reads
-0 running / 0 waiting.
+The raw JSONL probe outputs were retained locally during release verification
+under `/tmp/peterbot-latency-{greeting,work,coding-none}.jsonl`; they contain
+timing and token metrics but no prompts or reasoning text. The first two runs
+preceded the explicit-work profile change. The non-thinking coding run was an
+isolated compatibility/latency test before that profile was deployed.
