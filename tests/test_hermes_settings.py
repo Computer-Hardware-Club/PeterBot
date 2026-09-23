@@ -36,7 +36,7 @@ def test_valid_settings_defaults_and_normalization(load):
     assert settings.max_tokens == 8192
     assert settings.listen_channel_ids == frozenset()
     assert settings.control_channel_ids == frozenset()
-    assert settings.conversation_lease_seconds == 120
+    assert settings.conversation_lease_seconds == 300
     with pytest.raises(FrozenInstanceError):
         settings.officer_only = False
 
