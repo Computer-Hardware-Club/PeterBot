@@ -137,6 +137,21 @@ SERIOUS_RE = re.compile(
     r'github|docker|database|query|server|network|ssh|linux|rust|python|c\+\+|verilog|fpga|arduino|'
     r'r\?\d+|fix|repair|broken|won\'?t|does\s+not\s+work)\b', re.IGNORECASE)
 ATTACHMENT_RE = re.compile(r'\b(?:file|log|screenshot|image|photo|diagram|pdf|zip|patch|diff|dump)\b', re.IGNORECASE)
+# A clean text answer cannot satisfy an explicit file delivery or verified
+# execution request. This is a postcondition on the model's decision, not a
+# classifier before ordinary chat; it prevents "sending it now" without work.
+DELIVERABLE_REQUEST_RE = re.compile(
+    r'\b(?:attach|upload|send)\b[^.!?]{0,120}\b(?:source|files?|scripts?|programs?|projects?|artifacts?|readme)\b',
+    re.IGNORECASE)
+EXECUTION_REQUEST_RE = re.compile(
+    r'\b(?:compile|run|execute|test|benchmark)\b[^.!?]{0,100}'
+    r'\b(?:in (?:your|the) sandbox|and (?:send|attach)|before (?:answering|sending))\b',
+    re.IGNORECASE)
+
+
+def requires_tool_result(prompt: str) -> bool:
+    text = prompt[:1000]
+    return bool(DELIVERABLE_REQUEST_RE.search(text) or EXECUTION_REQUEST_RE.search(text))
 # Explicit depth requests outrank the casual shape of a message ("quick question: explain…").
 DEPTH_MARKERS = ('in detail', 'in-depth', 'deep dive', 'go deep', 'go deeper', 'at length', 'full writeup',
                  'write up', 'long version', 'be thorough', 'thorough answer', 'comprehensive', 'step by step',
@@ -520,6 +535,11 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
         message = choice.get('message') or {}
         kind, text = _decode(message, choice.get('finish_reason'))
         if kind == ANSWER:
+            if requires_tool_result(prompt):
+                log_with_context(logging.WARNING,
+                                 'Explicit deliverable or execution request answered without tools; handing off',
+                                 prompt_chars=len(prompt))
+                return None
             return text
         if kind == HANDOFF:
             return None

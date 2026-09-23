@@ -44,6 +44,22 @@ def test_greeting_gets_one_fast_non_thinking_attempt_without_the_4096_allowance(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('prompt', [
+    'Build a Rust CLI. Compile and test it in your sandbox, then attach the source files.',
+    'Please attach the source and a README for that program.',
+])
+def test_clean_promise_cannot_replace_requested_execution_or_attachment(prompt):
+    result, calls = run({'content': 'Got it — sending the files now.'}, prompt)
+    assert result is None
+    assert len(calls) == 1
+
+
+def test_conceptual_coding_question_can_still_get_a_direct_answer():
+    result, _calls = run({'content': 'Use cargo build, then cargo test.'},
+                         'How do I compile and test a Rust CLI?')
+    assert result == 'Use cargo build, then cargo test.'
+
+
 def test_tier_selection_shapes_generation_not_routing():
     assert select_tier('hey') == CASUAL
     assert select_tier('lmao nice one') == CASUAL

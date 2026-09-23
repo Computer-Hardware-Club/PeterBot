@@ -6,8 +6,9 @@ completion budget as the answer, and live notes show thinking-only turns ending
 blank with `finish_reason=stop` — so a blanket 4096-token thinking allowance is both
 slow for greetings and still not safe for hard questions. `peterbot/conversation.py`
 instead bounds the turn with three tiers. The tier bounds the **generation shape
-only**: routing to the sandbox remains the model's `use_tools` decision, never a
-keyword router.
+only**: the model normally decides whether to call `use_tools`. One output
+postcondition prevents a clean text reply from claiming an explicitly requested
+attachment or sandbox execution; that request is handed to the worker instead.
 
 ## Tiers
 
@@ -46,6 +47,9 @@ or `inference.timeout_seconds`.
   `{"reason": …}` arguments, and a completion finish marker (`tool_calls`/`stop`).
 - `finish_reason=length`/`content_filter`, a missing finish marker, malformed or
   invented tool arguments ⇒ retry without thinking, never a handoff, never member-visible.
+- A clean text promise cannot satisfy an explicit request to attach source/files
+  or compile and test in Peter's sandbox. That answer hands off to real work;
+  malformed tool output still does not authorize a handoff.
 - Transport failure on every attempt ⇒ `ValueError(MODEL_UNAVAILABLE_REPLY)`;
   two blank completions ⇒ the canned retry-line. A ≥40-char truncated answer is
   kept as a last resort rather than replaced by a canned line.
