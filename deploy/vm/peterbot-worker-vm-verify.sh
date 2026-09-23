@@ -28,7 +28,7 @@ esac
 [ "$(sysctl -n net.bridge.bridge-nf-call-iptables 2>/dev/null)" = 1 ] \
   && ok "bridge netfilter enabled" || bad "br_netfilter/sysctl not applied — wall bypassed"
 # The broker alias must own ARP on the bridge or DNAT never sees frames.
-ip -4 addr show pbworkers 2>/dev/null | grep -q '192\.168\.240\.2' \
+ip -4 -o addr show dev pbworkers 2>/dev/null | awk '$4 == "192.168.240.2/32" {found=1} END {exit !found}' \
   && ok "broker alias .240.2 answers ARP" || bad "broker alias missing from pbworkers"
 iptables -w -t nat -S PETERBOT-BROKER 2>/dev/null | grep -q 'DNAT.*192\.168\.241\.1:8770' \
   && ok "broker DNAT targets the P910 host-publish address (not the guest)" \
@@ -67,6 +67,10 @@ docker network inspect peterbot_workers --format '{{index .Options "com.docker.n
 wi=$(docker network inspect peterbot_workers --format '{{.Internal}}' 2>/dev/null)
 [ "$wi" = "true" ] && ok "worker net internal (no docker egress path)" \
   || bad "worker net must be --internal; our ALLOW is the only door"
+docker network inspect peterbot_workers --format '{{json .IPAM.Config}}' 2>/dev/null | \
+  python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; sys.exit(0 if c.get("AuxiliaryAddresses",{}).get("broker")=="192.168.240.2" and c.get("IPRange")=="192.168.240.128/25" else 1)' 2>/dev/null \
+  && ok "broker alias reserved outside worker IP pool" \
+  || bad "Docker IPAM may assign 192.168.240.2 to a worker"
 
 # 6. No ip_nonlocal_bind: a real-interface bind is required, so the flag must
 # stay off or any process could bind arbitrary source addresses.

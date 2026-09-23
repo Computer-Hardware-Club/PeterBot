@@ -7,7 +7,7 @@
   "conversation_lease_seconds": 120,
   "officer_only": true,
   "runner_url": "http://runner:8780",
-  "tool_service_url": "http://gateway:8770",
+  "tool_service_url": "http://192.168.240.2:8770",
   "state_dir": "/app/peterbot-data/hermes",
   "max_iterations": 30,
   "max_tokens": 8192,

@@ -149,6 +149,14 @@ def test_broker_publish_is_host_address_only_and_consistent():
                 "post-DNAT chains must match 192.168.241.1, not the pre-DNAT alias"
 
 
+def test_broker_alias_is_reserved_and_checked_as_an_exact_host_address():
+    """A broadcast .255 must never pass as alias .2, or Docker assigns .2 to worker 1."""
+    assert "--aux-address broker=192.168.240.2" in SETUP
+    assert "--ip-range 192.168.240.128/25" in SETUP
+    assert '$4 == "192.168.240.2/32"' in FIREWALL
+    assert '$4 == "192.168.240.2/32"' in VERIFY
+
+
 def test_worker_subnet_bridge_and_setup_stay_identical():
     subnet = re.search(r"WORKER_SUBNET=([\d./]+)", FIREWALL).group(1)
     bridge = re.search(r'WORKER_BRIDGE=(\S+)', FIREWALL).group(1)

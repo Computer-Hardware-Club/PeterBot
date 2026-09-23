@@ -24,12 +24,13 @@ BROKER_REAL=192.168.241.1:8770
 # This unit runs BEFORE docker. Pre-create the bare worker bridge (docker adopts
 # an existing same-name bridge) so the alias is live even on a boot where no
 # worker has started yet; the alias IP must answer ARP on the bridge or frames
-# die before PREROUTING ever sees them.
+# die before PREROUTING ever sees them. Docker IPAM must reserve .240.2 as an
+# auxiliary address; otherwise worker one gets .240.2 and talks to itself.
 if ! ip link show "$WORKER_BRIDGE" >/dev/null 2>&1; then
   ip link add name "$WORKER_BRIDGE" type bridge
   ip link set "$WORKER_BRIDGE" up
 fi
-ip -4 addr show "$WORKER_BRIDGE" | grep -q '192\.168\.240\.2' || \
+ip -4 -o addr show dev "$WORKER_BRIDGE" | awk '$4 == "192.168.240.2/32" {found=1} END {exit !found}' || \
   ip addr add 192.168.240.2/32 dev "$WORKER_BRIDGE"
 
 # --- FORWARD: worker egress wall ---------------------------------------------

@@ -8,8 +8,13 @@ worker compiled and ran the pinned Rust fixture and passed 30 checks after
 a guest reboot. The final image also passed six offline wheel/crate cache checks
 inside the VM. The setup-only NAT vNIC was detached from the live and persistent
 domain; the guest rebooted with only the host-only control link, and both
-worker smokes passed again. The broker capability probe was a declared skip
-because the final gateway overlay is not yet deployed. Production still uses
+worker smokes passed again. A Docker IPAM conflict initially gave a worker
+the broker alias `.240.2`; that address is now reserved and workers allocate
+from `.128/25`. After another reboot the worker received a `401` through the
+guest DNAT and narrow P910 UFW rule from a temporary host-only test listener;
+the full synthetic-path smoke passed 31 checks with no skips. The actual gateway
+broker is still a release gate because the overlay is not yet deployed.
+Production still uses
 the earlier gateway and host runner images. The recipe remains the recovery
 path for the pinned Debian generic-cloud `20260909-2596` and Rust `2026-09-03`
 inputs.
@@ -45,8 +50,8 @@ P910 (trusted host, stays as-is)                       guest: peterbot-worker
 | `192.168.241.1` | P910 host on `virbr-ctl` | broker `:8770` is published **only** here via the VM overlay; nothing else |
 | `192.168.241.2` | guest vNIC2, static on `virbr-ctl` | runner API, published **only** here; also the MASQUERADE source for broker traffic |
 | `192.168.242.0/24` (`ctl0`) | guest `peterbot_control` bridge | runner's container network; NO L2 with `pbworkers` |
-| `192.168.240.1` | guest on `pbworkers` | bridge gateway address; worker default route, then DROPned |
-| `192.168.240.2` | broker alias on `pbworkers` (DNAT) | worker-side target stays identical to the P910 compose design |
+| `192.168.240.1` | guest on `pbworkers` | bridge gateway address; the internal worker network has no general default route |
+| `192.168.240.2` | broker alias on `pbworkers` (DNAT) | Docker IPAM reserves this address; workers allocate from `192.168.240.128/25` |
 
 Broker ingress is a docker published port on P910 bound to `192.168.241.1`
 ONLY (`deploy/vm/compose.hermes-vm-gateway.yml`). The overlay also disables
@@ -151,7 +156,8 @@ runtime uid) plus `virbr-ctl`.
    `peterbot-worker-vm-setup.sh` — apt docker-ce and docker-compose-plugin (Docker's signed repo),
    sshd key-only hardening, `ip_forward` + `br_netfilter` persistence
    (deliberately NOT `ip_nonlocal_bind`), the external networks
-   (`peterbot_workers` bridge `pbworkers` internal/ICC-off/masq-off;
+   (`peterbot_workers` bridge `pbworkers` internal/ICC-off/masq-off with
+   `.240.2` reserved as an auxiliary address and workers in `.128/25`;
    `peterbot_control` bridge `ctl0` — routable because the runner's published
    port needs the DNAT path; workers NEVER join it), the egress-wall systemd
    unit (pre-creates the bare bridge so the broker alias answers ARP before
@@ -217,10 +223,12 @@ runtime uid) plus `virbr-ctl`.
      `PETERBOT_ISOLATION_HOST_GATEWAY=192.168.241.1`,
      `PETERBOT_ISOLATION_INFERENCE_HOST=100.73.210.66`,
      `PETERBOT_ISOLATION_P910_HOST=100.99.6.59`.
-   - P910 host gate: the published broker port means P910 INPUT must ACCEPT
-     new TCP from `192.168.241.2` on `virbr-ctl` (stock Docker hosts ACCEPT
-     INPUT; a ufw/`--deny`-input host needs the operator to allow that one
-     source). The step-8 smoke is the real end-to-end proof.
+   - P910 host gate: its UFW INPUT policy is DROP. A persistent narrow rule now
+     allows only TCP from `192.168.241.2` on `virbr-ctl` to
+     `192.168.241.1:8770` (`ufw allow in on virbr-ctl from 192.168.241.2 to
+     192.168.241.1 port 8770 proto tcp comment PeterBot-VM-broker`). The
+     synthetic-listener smoke proved this path; the final test repeats it
+     against Peter's actual authenticated broker after the gateway cutover.
 
 Posture B (no internet at all in the guest): after first boot,
 `virsh detach-device peterbot-worker <vnic1.xml>` and remove the NAT interface

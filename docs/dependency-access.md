@@ -68,8 +68,11 @@ every redirect:
 ## Budgets and failure shape
 
 - Per artifact: 32 MiB (`MAX_PACKAGE_BYTES`). Per task broker quota: 64 MiB
-  (`PACKAGE_TASK_BYTES`), accumulated on the capability and enforced at the
-  gateway before the broker runs.
+  (`PACKAGE_TASK_BYTES`) of successfully verified bytes, accumulated on the
+  capability and enforced atomically at the gateway before each fetch. Failed
+  downloads are bounded by the artifact cap and task deadline but are not
+  charged against this byte quota. There is no separate package request-count
+  ceiling yet; the task deadline also bounds repeated failures.
 - Every package fetch shares the task deadline: the gateway refuses (429) when
   fewer than 10 seconds remain and clamps the broker call to the remaining
   budget.

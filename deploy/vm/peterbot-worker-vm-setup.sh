@@ -58,16 +58,24 @@ modprobe br_netfilter
 sysctl --system >/dev/null
 
 # 5. External networks, owned HERE so bridge names/subnets/IPv6 are fixed, not
-# invented by whoever runs compose first. Both are `internal` (no Docker DNAT
-# egress paths); the ONLY sanctioned worker egress is the firewall's DNAT.
+# invented by whoever runs compose first. The broker alias .240.2 is reserved
+# in Docker IPAM; without this the first worker receives .240.2 itself and its
+# broker socket connects to its own namespace. Workers allocate from .128/25.
+# The worker network is `internal`; the ONLY sanctioned worker egress is DNAT.
 systemctl enable --now docker
 docker network create --driver bridge \
   --opt com.docker.network.bridge.name=pbworkers \
   --opt com.docker.network.bridge.enable_icc=false \
   --opt com.docker.network.bridge.enable_ip_masquerade=false \
   --subnet 192.168.240.0/24 --gateway 192.168.240.1 \
+  --aux-address broker=192.168.240.2 --ip-range 192.168.240.128/25 \
   --internal \
   peterbot_workers 2>/dev/null || docker network inspect peterbot_workers >/dev/null
+docker network inspect peterbot_workers --format '{{json .IPAM.Config}}' | \
+  python3 -c 'import json,sys; c=json.load(sys.stdin)[0]; sys.exit(0 if c.get("AuxiliaryAddresses",{}).get("broker")=="192.168.240.2" and c.get("IPRange")=="192.168.240.128/25" else 1)' || {
+  echo 'FATAL: worker network has unsafe IPAM; drain workers and recreate with broker alias reserved' >&2
+  exit 1
+}
 # Control net is NOT internal: the runner's published port needs Docker's
 # inbound DNAT path on .241.2 (internal networks skip published-port rules).
 # Trust boundary: only the supervisor joins it — never a worker.

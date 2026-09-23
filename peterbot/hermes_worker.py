@@ -214,15 +214,34 @@ def _stage_artifact(entry: dict, data: bytes, workspace: Path, cargo_home: Path)
     registry, index = _cargo_registry_layout(cargo_home)
     registry.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = _dep_path(entry["filename"], registry)
-    with path.open("wb") as handle:
-        handle.write(data)
     line = entry.get("index_line")
     if not isinstance(line, str) or not line or len(line) > 65536:
         raise ValueError("Dependency index line missing")
     index_path = index.joinpath(*index_dir(entry["name"]).split("/"))
     index_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with index_path.open("wb") as handle:
-        handle.write(line.encode("utf-8") + b"\n")
+    if index_path.is_symlink():
+        raise ValueError("Dependency index path is a symlink")
+    existing = []
+    if index_path.exists():
+        if index_path.stat().st_size > 2 * 1024 * 1024:
+            raise ValueError("Dependency index is too large")
+        existing = index_path.read_text(encoding="utf-8").splitlines()
+    append_line = True
+    for prior in existing:
+        try:
+            prior_version = json.loads(prior)["vers"]
+        except (ValueError, KeyError, TypeError):
+            raise ValueError("Dependency index contains invalid data") from None
+        if prior_version == entry["version"]:
+            if prior != line:
+                raise ValueError("Dependency index has a conflicting version")
+            append_line = False
+            break
+    with path.open("wb") as handle:
+        handle.write(data)
+    if append_line:
+        with index_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
     _cargo_source_config(cargo_home)
     return {"status": "ok", "registry": "cratesio", "name": entry["name"], "version": entry["version"],
             "path": str(path), "index": str(index_path), "sha256": entry["sha256"], "size": entry["size"],
