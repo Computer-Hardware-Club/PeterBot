@@ -39,7 +39,7 @@ import aiohttp
 
 from .knowledge import build_knowledge_excerpt, rank_knowledge_chunks
 from .logging_utils import log_error_with_context, log_with_context
-from .prompts import strip_think_blocks
+from .prompts import remove_em_dashes, simple_greeting_reply, strip_think_blocks
 
 TOOL_HANDOFF = {
     'type':'function', 'function': {
@@ -115,7 +115,7 @@ MAX_CONTROL_TURNS = 2
 PARTIAL_MIN_CHARS = 40
 BLANK_ANSWER_REPLY = 'Hmm, I lost that one in the wash. Say it again and I will take another run at it.'
 # Raised as ValueError so the mention handler shows this text instead of an internal string.
-MODEL_UNAVAILABLE_REPLY = 'My model service is unavailable right now — try me again in a minute.'
+MODEL_UNAVAILABLE_REPLY = 'My model service is unavailable right now, try me again in a minute.'
 BLANK_ANSWER_NUDGE = ('Your previous attempt came back with no answer text. Reply to the last message now '
                       'with the answer itself: plain text, no thinking block, no tool call, at most a few sentences.')
 CONTINUE_INSTRUCTION = ('Continue exactly where the previous message stopped. Add nothing before those words '
@@ -287,7 +287,9 @@ def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: S
                    *, club_context: str = "", style_instruction: str = "") -> str:
     system = config.peter_system_prompt + (
         '\n\nYou are chatting in Discord. Most mentions are casual conversation, not assignments. '
-        'Respond naturally and briefly: usually one sentence or a few lines. Match the joke or question. '
+        'Talk like a laid back club regular. Use only the words needed to answer. '
+        'A bare hello needs one or two words, no punctuation. Match the joke or question. '
+        'Keep punctuation light and never use an em dash. '
         'Answer only what was asked: a definition does not need installation advice or a troubleshooting guide. '
         'Play along with obvious fictional banter without an AI disclaimer. '
         'Do not create a task plan, announce tools, offer a menu, or add a closing offer of help. '
@@ -493,6 +495,10 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
     gateway/foreground scheduler passes what is left of its own deadline so the model
     never starts an oversized call that outlives the turn.
     """
+    greeting = None if has_attachments else simple_greeting_reply(
+        prompt, getattr(config, 'peter_name', 'Peter'))
+    if greeting is not None:
+        return greeting
     tier = select_tier(prompt, has_attachments=has_attachments,
                        context_turns=len(context or []), config=config)
     system = _system_prompt(config, principal, prompt, knowledge_chunks,
@@ -555,7 +561,7 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
                                  'Explicit deliverable or execution request answered without tools; handing off',
                                  prompt_chars=len(prompt))
                 return None
-            return text
+            return remove_em_dashes(text)
         if kind == HANDOFF:
             return None
         # Blank or truncated: keep any real text so the rescue can continue it instead
@@ -573,7 +579,7 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
         # Truncated text the model actually wrote beats a canned line for the member.
         log_with_context(logging.WARNING, 'Conversation answer delivered without a clean finish',
                          tier=tier, attempts=attempts, answer_chars=len(partial_answer))
-        return partial_answer
+        return remove_em_dashes(partial_answer)
     log_error_with_context('Conversation model returned no usable answer', attempts=attempts, tier=tier,
                            model=str(getattr(config.inference, 'model', '')), prompt_chars=len(prompt))
     return BLANK_ANSWER_REPLY

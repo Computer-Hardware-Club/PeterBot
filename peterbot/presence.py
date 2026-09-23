@@ -26,6 +26,7 @@ import discord
 
 from .context import split_for_discord
 from .logging_utils import log_with_context
+from .prompts import remove_em_dashes
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +39,12 @@ MIN_EDIT_SECONDS = 3.0
 PROGRESS_EVERY_SECONDS = 20.0
 DEFAULT_SEND_CHARS = 1800
 STAGE_LABELS = {
-    'queued': 'queued', 'starting': 'starting', 'working': 'working through the request',
-    'researching': 'researching', 'running_code': 'running code',
-    'reading_files': 'reading files', 'editing_files': 'working on files',
-    'checking_memory': 'checking saved context',
-    'calculating': 'calculating', 'preparing_answer': 'preparing the answer',
+    'queued': '*waiting my turn*', 'starting': '*cracking knuckles*',
+    'working': '*pondering*', 'researching': '*digging around*',
+    'running_code': '*letting the compiler judge me*',
+    'reading_files': '*squinting at files*', 'editing_files': '*moving bits around*',
+    'checking_memory': '*checking notes*', 'calculating': '*doing math*',
+    'preparing_answer': '*visibly scratching head*',
 }
 
 
@@ -64,6 +66,7 @@ class Presence:
         self._poster: Optional[asyncio.Task] = None
         self._last_edit = 0.0
         self._last_text = ''
+        self._started_at = self.now()
         self.partial_delivery = False
 
     @property
@@ -112,7 +115,7 @@ class Presence:
     async def _post_later(self) -> None:
         try:
             await asyncio.sleep(self.status_after)
-            await self.show('on it — thinking this through…')
+            await self.show(progress_text('working', self.now() - self._started_at))
         except asyncio.CancelledError:
             raise
         except discord.HTTPException:
@@ -123,7 +126,7 @@ class Presence:
 
     async def show(self, text: str, *, force: bool = False) -> Optional[Any]:
         """Post or edit the status line. Throttled unless ``force``."""
-        text = text.strip()[:self.max_chars]
+        text = remove_em_dashes(text.strip())[:self.max_chars]
         if self.message is None:
             try:
                 self.message = await self.channel.send(text, allowed_mentions=discord.AllowedMentions.none(),
@@ -185,6 +188,10 @@ def elapsed_label(seconds: float) -> str:
     return f'{minutes}m {remainder:02d}s'
 
 
+def progress_text(stage: str, seconds: float) -> str:
+    return f"{STAGE_LABELS.get(stage, STAGE_LABELS['working'])} ({elapsed_label(seconds)})"
+
+
 async def watch_task(presence: Presence, job_id: str, *, interval: float = PROGRESS_EVERY_SECONDS,
                      status: str = 'running', status_getter: Callable[[], str] | None = None) -> None:
     """Keep a long task's status line honest until it is done.
@@ -195,13 +202,8 @@ async def watch_task(presence: Presence, job_id: str, *, interval: float = PROGR
     try:
         while True:
             await asyncio.sleep(interval)
-            if status_getter is None:
-                text = (f'still working — {elapsed_label(time.monotonic() - started)} in '
-                        f'({status}). I will post the result here.')
-            else:
-                stage = status_getter()
-                label = STAGE_LABELS.get(stage, 'working')
-                text = f'{label} — {elapsed_label(time.monotonic() - started)} elapsed. I will post the result here.'
+            stage = status_getter() if status_getter is not None else status
+            text = progress_text(stage, time.monotonic() - started)
             await presence.show(text)
     except asyncio.CancelledError:
         raise

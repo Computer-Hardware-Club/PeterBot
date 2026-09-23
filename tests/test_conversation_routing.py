@@ -47,6 +47,23 @@ def public_job(gateway, **kwargs):
                                prompt="Look this up", delivery_mode="channel", **kwargs)
 
 
+def test_bare_greeting_uses_no_model_or_worker(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            gateway.jobs.create(guild_id=10, user_id=1, channel_id=20,
+                                source_message_id=29, prompt='Existing private task')
+            gateway.conversational_reply = AsyncMock()
+            gateway.submit = AsyncMock()
+            message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
+                                      author=SimpleNamespace(id=1), attachments=[], reply=AsyncMock())
+            await gateway.respond_to_message(message, 'hey peter')
+            message.reply.assert_awaited_once()
+            assert message.reply.await_args.args[0] == 'yo'
+            gateway.conversational_reply.assert_not_awaited()
+            gateway.submit.assert_not_awaited()
+    asyncio.run(scenario())
+
+
 def test_channel_submission_does_not_create_thread_or_emit_status(tmp_path):
     async def scenario():
         async with conversation_gateway(tmp_path) as (gateway, channel):
@@ -223,9 +240,9 @@ def test_conversation_replies_directly_or_escalates_visibly(tmp_path, answer):
             gateway.submit = AsyncMock()
             message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
                                       author=SimpleNamespace(id=1, display_name="Officer", bot=False),
-                                      content="Hey Peter", attachments=[], reply=AsyncMock(),
+                                      content="Hey Peter, can you help?", attachments=[], reply=AsyncMock(),
                                       created_at=datetime.now(timezone.utc))
-            await gateway.respond_to_message(message, "Hey Peter")
+            await gateway.respond_to_message(message, "Hey Peter, can you help?")
             channel.create_thread.assert_not_awaited()
             gateway.conversational_reply.assert_awaited_once()
             if answer is None:
@@ -233,7 +250,7 @@ def test_conversation_replies_directly_or_escalates_visibly(tmp_path, answer):
                 # hold the answer, instead of leaving the channel silent.
                 message.reply.assert_not_awaited()
                 channel.send.assert_awaited_once()
-                assert "on it" in channel.send.await_args.args[0]
+                assert channel.send.await_args.args[0] == '*pondering* (0s)'
                 gateway.submit.assert_awaited_once()
                 submitted = gateway.submit.await_args.kwargs
                 assert submitted["in_channel"] is True
@@ -310,7 +327,7 @@ def test_fast_model_answers_or_hands_off_without_exposing_reasoning(tmp_path, ha
                                           "function": {"name": "use_tools", "arguments": '{"reason":"Need tools"}'}}]
             gateway.session.result = {"choices": [{"message": message,
                 "finish_reason": "tool_calls" if handoff else "stop"}]}
-            reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi", [])
+            reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi, what do you think?", [])
             assert reply == (None if handoff else "Hey.")
             url, request = gateway.session.calls[0]
             assert url == "http://model/v1/chat/completions"
@@ -328,7 +345,7 @@ def test_invented_fast_model_tool_decision_never_hands_off(tmp_path, name, argum
         async with conversation_gateway(tmp_path) as (gateway, _):
             gateway.session.result = {"choices": [{"message": {"tool_calls": [
                 {"function": {"name": name, "arguments": arguments}}]}}]}
-            reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi", [])
+            reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi, what do you think?", [])
             assert isinstance(reply, str) and reply
             assert gateway.jobs.pending() == []
     asyncio.run(scenario())

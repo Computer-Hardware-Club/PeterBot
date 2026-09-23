@@ -446,11 +446,9 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
             async def acknowledge(position: int) -> None:
                 # Transport-only queue ack: no model call, and it carries only
                 # a count — never another requester's prompt or channel.
-                where = "ahead of you" if position > 1 else "ahead of me"
                 await send_chunked_reply(
                     message,
-                    f"I heard you — {position} request{'s' if position > 1 else ''} {where}. "
-                    "One thing at a time; I'll answer here.",
+                    f"{position} ahead of you, i'll reply here",
                     max_len=config.max_discord_message_chars)
 
             try:
@@ -648,8 +646,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
         async def acknowledge(position: int) -> None:
             await safe_send_interaction_message(
                 interaction,
-                f"I'm on it — {position} request{'s' if position > 1 else ''} in front of yours. "
-                "I'll answer you here when it's your turn.",
+                f"{position} ahead of you, i'll answer here",
                 ephemeral=True,
             )
 
@@ -793,7 +790,7 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
         async def acknowledge(position: int) -> None:
             await safe_send_interaction_message(
                 interaction,
-                f"I'll recap that — {position} request{'s' if position > 1 else ''} in front of yours.",
+                f"{position} ahead of you, i'll recap it here",
                 ephemeral=True,
             )
 

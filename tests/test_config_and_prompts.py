@@ -249,7 +249,7 @@ def test_build_system_prompt_layers_qwen_rules_channel_profile_and_knowledge(tmp
     assert "You are the club bot or assistant, not a human member of the server." in prompt
     assert "Use one short paragraph by default." in prompt
     assert "Do not ask a follow up question unless clarification is actually required." in prompt
-    assert "Do not use hyphen, en dash, or em dash punctuation in normal reply prose." in prompt
+    assert "Keep punctuation light. Never use an em dash." in prompt
     assert "Focused context: This is the immediate reply target." in prompt
     assert "Channel profile:" in prompt
     assert "Relevant club knowledge:" in prompt
@@ -291,7 +291,7 @@ def test_build_system_prompt_keeps_short_reply_rules_for_generic_profiles(tmp_pa
     )
 
     assert "Use one short paragraph by default." in prompt
-    assert "Usually answer in 1 to 3 short sentences." in prompt
+    assert "Use as few words as the question needs. A bare greeting gets one or two words." in prompt
     assert "Sound like a Discord message, not an essay." in prompt
     assert "Do not ask a follow up question unless clarification is actually required." in prompt
 

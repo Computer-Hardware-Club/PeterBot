@@ -5,7 +5,7 @@
   },
   "hello_response": {
     "raw": "Hey, what's up?",
-    "expected": "Hi."
+    "expected": "yo"
   },
   "mention_response": {
     "raw": "The PSU swap makes sense for that build.\n\nlol yeah that's the move. Anything else?",

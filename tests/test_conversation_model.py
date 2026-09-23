@@ -20,13 +20,36 @@ def config(**inference):
     return SimpleNamespace(peter_system_prompt='You are Peter.', inference=settings, llama_cpp_api_key='private-key')
 
 
-def run(response, prompt='hi', context=None, *, knowledge_chunks=(), **kwargs):
+def run(response, prompt="how's it going?", context=None, *, knowledge_chunks=(), **kwargs):
     inference = kwargs.pop('inference', {})
     session = UpstreamSession()
     session.result = {'choices': [{'message': response}]}
     result = asyncio.run(reply_or_use_tools(session, config(**inference), Principal(10, 1, 20, (100,)), prompt,
                                            context or [], knowledge_chunks=knowledge_chunks, **kwargs))
     return result, session.calls
+
+
+@pytest.mark.parametrize(('prompt', 'expected'), [
+    ('hey peter', 'yo'), ('hi Peter!', 'yo'), ('peter, hey', 'yo'),
+    ('yo peter', 'whats good'), ('Peter', 'yo'),
+])
+def test_bare_greeting_is_tiny_and_never_calls_the_model(prompt, expected):
+    result, calls = run({'content': 'Long greeting from the model.'}, prompt)
+    assert result == expected
+    assert calls == []
+    assert len(result.split()) <= 2 and not result.endswith(('.', '!', '?'))
+
+
+def test_greeting_with_a_real_question_still_uses_the_model():
+    result, calls = run({'content': 'A capacitor stores charge.'},
+                        'hey Peter, what is a capacitor?')
+    assert result == 'A capacitor stores charge.'
+    assert len(calls) == 1
+
+
+def test_model_prose_never_returns_an_em_dash():
+    result, _ = run({'content': 'That works — send it over.'})
+    assert result == 'That works, send it over.'
 
 
 def test_greeting_gets_one_fast_non_thinking_attempt_without_the_4096_allowance():
@@ -134,7 +157,7 @@ def test_malformed_tool_decision_never_hands_off(name, arguments):
                       'finish_reason': 'tool_calls'}]},
         {'choices': [{'message': {'content': 'Ask me something concrete.'}}]},
     ]
-    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), 'hi', []))
+    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), "how's it going?", []))
     assert result == 'Ask me something concrete.'
     assert len(session.calls) == 2
 
@@ -143,7 +166,7 @@ def test_blank_answer_is_retried_and_never_errors():
     session = UpstreamSession()
     session.results = [{'choices': [{'message': {'content': '', 'reasoning': 'thought about it'}}]},
                        {'choices': [{'message': {'content': 'KEC 1005, Fridays at 6.'}}]}]
-    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), 'hi', []))
+    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), "how's it going?", []))
     assert result == 'KEC 1005, Fridays at 6.'
     assert session.calls[0][1]['json']['chat_template_kwargs']['enable_thinking'] is False
     assert session.calls[1][1]['json']['chat_template_kwargs']['enable_thinking'] is False
@@ -180,7 +203,7 @@ def test_two_blank_answers_end_in_a_human_reply_not_an_error():
     session = UpstreamSession()
     session.results = [{'choices': [{'message': {'content': '', 'reasoning': 'one'}}]},
                        {'choices': [{'message': {'content': '   '}}]}]
-    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), 'hi', []))
+    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), "how's it going?", []))
     assert result == BLANK_ANSWER_REPLY
     assert len(session.calls) == 2
 
@@ -202,7 +225,7 @@ def test_model_unreachable_on_every_attempt_raises_a_human_message():
     session = UpstreamSession()
     session.fail_times = 5
     with pytest.raises(ValueError) as error:
-        asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), 'hi', []))
+        asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), "how's it going?", []))
     assert str(error.value) == MODEL_UNAVAILABLE_REPLY
     assert 'Traceback' not in str(error.value)
     assert len(session.calls) == 2
@@ -234,7 +257,7 @@ def test_single_budget_across_attempts_from_caller():
     session.results = [{'choices': [{'message': {'content': ''}}]},
                        {'choices': [{'message': {'content': 'Two short tries.'}}]}]
     result = asyncio.run(reply_or_use_tools(session, config(timeout_seconds=420),
-                                            Principal(10, 1, 20, (100,)), 'hi', [], budget_seconds=40))
+                                            Principal(10, 1, 20, (100,)), "how's it going?", [], budget_seconds=40))
     assert result == 'Two short tries.'
     # Both ceilings come from the one shared remaining budget: neither attempt may be
     # granted more wall-clock than the scheduler handed over.
@@ -254,7 +277,7 @@ def test_no_oversized_call_starts_near_the_deadline():
 
 def test_deadline_already_spent_answers_safely_without_calling():
     session = UpstreamSession()
-    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), 'hi', [],
+    result = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)), "how's it going?", [],
                                             budget_seconds=0))
     assert session.calls == []
     assert result == BLANK_ANSWER_REPLY
@@ -411,7 +434,7 @@ def test_configured_tier_overrides_shape_the_payload():
                           conversation={'tiers': {'casual': {'budget_tokens': 256, 'temperature': 0.9}}})
     session = UpstreamSession()
     session.result = {'choices': [{'message': {'content': 'yo.'}}]}
-    result = asyncio.run(reply_or_use_tools(session, cfg, Principal(10, 1, 20, (100,)), 'hey', []))
+    result = asyncio.run(reply_or_use_tools(session, cfg, Principal(10, 1, 20, (100,)), "how's it going?", []))
     assert result == 'yo.'
     assert session.calls[0][1]['json']['max_tokens'] == 256
     assert session.calls[0][1]['json']['temperature'] == 0.9

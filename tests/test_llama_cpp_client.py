@@ -142,6 +142,14 @@ class FakeSession:
         self.closed = True
 
 
+def test_bare_greeting_skips_legacy_model_too(tmp_path: Path) -> None:
+    client = LlamaCppChatClient(build_config(tmp_path))
+    session = FakeSession(FakeResponse(status=200, json_data={}))
+    client.http_session = session
+    assert asyncio.run(client.call_chat("hey Peter", system_prompt="You are Peter.")) == "yo"
+    assert session.requests == []
+
+
 def test_llama_cpp_client_includes_images_in_chat_payload(tmp_path: Path) -> None:
     client = LlamaCppChatClient(build_config(tmp_path))
     session = FakeSession(

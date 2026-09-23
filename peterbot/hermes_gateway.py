@@ -324,7 +324,7 @@ class HermesGateway:
             else:
                 result = self.style.apply(p, intent, channel_is_private=private,
                     updates=dict(proposal.updates), expected_version=current['version'])
-                receipt = f"Got it — I’ll use that voice next turn (v{result['version']})."
+                receipt = f"got it, i'll use that next turn (v{result['version']})"
         elif request.action == 'announcement':
             target_id = request.payload['target_channel_id']
             record = self.outbox.propose(p, intent, target_channel_id=target_id,
@@ -445,10 +445,15 @@ class HermesGateway:
     async def respond_to_message(self, message, prompt):
         from .context import get_recent_channel_entries, send_chunked_reply, split_for_discord
         from .presence import Presence
+        from .prompts import simple_greeting_reply
         request_limit = getattr(getattr(self.config, 'agent', None), 'request_timeout_seconds', None)
         turn_deadline = (time.monotonic() + request_limit
                          if isinstance(request_limit, (int, float)) and request_limit > 0 else None)
         p=await self.principal(message.guild.id,message.author.id,message.channel.id)
+        greeting = None if message.attachments else simple_greeting_reply(prompt, self.config.peter_name)
+        if greeting is not None:
+            await send_chunked_reply(message, greeting)
+            return
         # A natural follow-up inside the owner's own private task thread is a
         # continuation of that task, not a fresh chat turn: the thread
         # membership itself is the binding. `latest_for_thread` only matches
@@ -459,7 +464,7 @@ class HermesGateway:
                             prompt.strip(), flags=re.IGNORECASE):
                 await self.cancel(thread_job['id'], p.guild_id, p.user_id)
                 await send_chunked_reply(message,
-                    'Cancellation requested. I’ll keep any valid partial files for review.')
+                    "cancel requested. i'll keep any valid files")
                 return
             await self.submit(guild_id=p.guild_id, user_id=p.user_id, channel=message.channel,
                 source_message_id=message.id, prompt=prompt, attachments=message.attachments,
@@ -504,8 +509,7 @@ class HermesGateway:
         self.require_work_access(p)
         # This is real work in another process for minutes: say so now, in the message
         # that will later hold the answer.
-        await presence.show("on it — this needs real work, so give me a bit. I'll post the result here.",
-                            force=True)
+        await presence.show('*pondering* (0s)', force=True)
         try:
             await self.submit(guild_id=p.guild_id,user_id=p.user_id,channel=message.channel,
                 source_message_id=message.id,prompt=prompt,attachments=message.attachments,
@@ -1149,7 +1153,7 @@ class HermesGateway:
 
         The worker does not stream progress, so anything more specific would be invented.
         """
-        from .presence import PROGRESS_EVERY_SECONDS, STAGE_LABELS, Presence, watch_task
+        from .presence import PROGRESS_EVERY_SECONDS, Presence, progress_text, watch_task
         interval = PROGRESS_EVERY_SECONDS if interval is None else interval
         try:
             channel = await self.bot.fetch_channel(job['channel_id'])
@@ -1160,8 +1164,7 @@ class HermesGateway:
         def current_stage() -> str:
             current = self.jobs.get(job['id'])
             return current.get('stage', 'working') if current else 'working'
-        await presence.show(f"{STAGE_LABELS.get(current_stage(), 'working')} — 0s elapsed. "
-                            'I will post the result here.', force=True)
+        await presence.show(progress_text(current_stage(), 0), force=True)
         await watch_task(presence, job['id'], interval=interval,
                          status_getter=current_stage)
 

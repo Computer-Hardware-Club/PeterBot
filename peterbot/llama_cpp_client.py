@@ -15,7 +15,8 @@ from .logging_utils import (
     new_debug_id,
 )
 from .tools import TOOL_SCHEMAS, ToolExecutor
-from .prompts import CHAT_MODE, build_chat_messages, cleanup_response_text, strip_think_blocks
+from .prompts import (CHAT_MODE, RECAP_MODE, build_chat_messages, cleanup_response_text,
+                      simple_greeting_reply, strip_think_blocks)
 
 MULTIMODAL_SETUP_MESSAGE = (
     "I can only look at images if the llama.cpp backend is running a multimodal vision model."
@@ -137,6 +138,10 @@ class LlamaCppChatClient:
             return "This model connection cannot read images yet. Paste the text or describe the image and I can help."
         if len(prompt_text) > self.config.agent.max_prompt_chars:
             return "That question is too long. Please shorten it and try again."
+        if not user_images and response_mode != RECAP_MODE:
+            greeting = simple_greeting_reply(prompt_text, self.config.peter_name)
+            if greeting is not None:
+                return greeting
         request_debug_id = new_debug_id("REQ")
         try:
             # One deadline covers all model rounds and tools, not a fresh timeout per step.

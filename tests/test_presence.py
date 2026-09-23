@@ -17,7 +17,7 @@ from peterbot.agent_jobs import JobStore
 from peterbot.agent_policy import Principal
 from peterbot.hermes_gateway import HermesGateway
 from peterbot.hermes_settings import HermesSettings
-from peterbot.presence import Presence, elapsed_label, watch_task
+from peterbot.presence import Presence, elapsed_label, progress_text, watch_task
 
 
 def http_error(status=403):
@@ -172,7 +172,7 @@ def test_progress_reports_elapsed_time_only():
         async with presence:
             await asyncio.sleep(0.01)
             clock[0] += 10.0  # past the edit throttle, as a real 20s tick would be
-            task = asyncio.create_task(watch_task(presence, 'job', interval=0.01, status='running'))
+            task = asyncio.create_task(watch_task(presence, 'job', interval=0.01, status='researching'))
             await asyncio.sleep(0.05)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -182,7 +182,7 @@ def test_progress_reports_elapsed_time_only():
     assert len(channel.sent) == 1, 'the status line must not spawn extra messages'
     edits = presence.message.edits
     assert edits, 'the status line should have been updated'
-    assert all(edit.startswith('still working — 0s in (running)') for edit in edits)
+    assert all(edit.startswith('*digging around* (0s)') for edit in edits)
     # No invented percentage, and no claim about a stage we cannot see.
     assert not any('%' in edit for edit in edits)
 
@@ -213,8 +213,8 @@ def test_worker_stage_updates_one_message_without_exposing_raw_text():
     channel = run(scenario())
     assert len(channel.sent) == 1
     edits = next(iter(channel.messages.values())).edits
-    assert any(edit.startswith('researching —') for edit in edits)
-    assert any(edit.startswith('running code —') for edit in edits)
+    assert any(edit.startswith('*digging around* (') for edit in edits)
+    assert any(edit.startswith('*letting the compiler judge me* (') for edit in edits)
     assert all('%' not in edit and 'rm -rf' not in edit for edit in edits)
 
 
@@ -225,18 +225,25 @@ def test_elapsed_label_is_readable():
     assert elapsed_label(605) == '10m 05s'
 
 
+def test_playful_progress_is_short_and_tracks_the_actual_stage():
+    assert progress_text('working', 40) == '*pondering* (40s)'
+    assert progress_text('preparing_answer', 40) == '*visibly scratching head* (40s)'
+    assert progress_text('running_code', 40) == '*letting the compiler judge me* (40s)'
+    assert '—' not in progress_text('working', 40)
+
+
 def test_adopt_wraps_an_already_posted_message():
     async def scenario():
         channel = FakeChannel()
-        posted = await channel.send('on it — this needs real work')
+        posted = await channel.send('on it, this needs real work')
         presence = Presence.adopt(channel, posted)
         assert presence.message_id == posted.id
-        await presence.show('on it — this needs real work')  # unchanged text: no edit
+        await presence.show('on it, this needs real work')  # unchanged text: no edit
         await presence.show('on it — still working', force=True)
         return posted
 
     posted = run(scenario())
-    assert posted.edits == ['on it — still working']
+    assert posted.edits == ['on it, still working']
 
 
 @asynccontextmanager
@@ -354,7 +361,7 @@ def test_progress_reporter_edits_the_message_the_member_is_watching(tmp_path):
 
     status, channel = run(scenario())
     assert len(channel.sent) == 1                 # never posts a second message
-    assert status.edits and status.edits[0].startswith('working through the request — ')
+    assert status.edits and status.edits[0] == '*pondering* (0s)'
 
 
 def test_long_fast_answer_retries_only_the_unsent_tail(tmp_path):

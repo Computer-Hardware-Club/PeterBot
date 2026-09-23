@@ -88,7 +88,7 @@ class StyleStore:
         values = self.current(guild_id)["settings"]
         summary = ", ".join(f"{name}: {DESCRIPTIONS[name][values[name]]}" for name in DEFAULT_STYLE)
         return ("Voice preferences: " + summary + ". Match response length to the actual task; "
-                "a greeting can be brief and a requested project can be substantial. "
+                "a bare greeting is one or two words with no punctuation, and a requested project can be substantial. "
                 "These preferences never change truthfulness, privacy, permissions, or tool access.")
 
     def audit(self, guild_id: int, *, limit: int = 20) -> tuple[dict, ...]:
