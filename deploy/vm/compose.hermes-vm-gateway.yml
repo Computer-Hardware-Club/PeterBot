@@ -1,0 +1,28 @@
+# P910-side compose OVERLAY for the VM rollout (PETER-12). Apply on P910 as:
+#   docker compose -f compose.hermes.yml -f deploy/vm/compose.hermes-vm-gateway.yml up -d --remove-orphans peterbot
+# It publishes the guest broker port, drops the old same-host runner dependency,
+# and detaches the gateway from the old host-worker network. The host runner is
+# behind an inactive profile; use --remove-orphans during the switch after all
+# old tasks have settled, and confirm that container is stopped.
+#
+# Why: with the runner moved into the guest VM, workers there must reach the
+# gateway broker on 8770. The guest wall DNATs the broker alias to
+# 192.168.241.1:8770 — this host-only virbr-ctl address. Publishing here makes
+# that the ONLY external path to the broker: bound to 192.168.241.1 (never
+# 0.0.0.0, never the tailnet), it accepts connections from the guest vNIC only.
+# The guest's source address is always its own vNIC (192.168.241.2, via the
+# wall's MASQUERADE), so P910 host INPUT policy must ACCEPT new TCP from that
+# segment to docker's published-port chain — the guest-side smoke proves the
+# end-to-end path; no firewall change should be needed on a stock ACCEPT-INPUT
+# Docker host.
+#
+# Rollback: `docker compose -f compose.hermes.yml up -d peterbot` (without this
+# overlay) removes the publish; nothing else references it.
+services:
+  peterbot:
+    depends_on: !reset []
+    networks: !override [control]
+    ports:
+      - '192.168.241.1:8770:8770'
+  runner:
+    profiles: [legacy-host-runner]

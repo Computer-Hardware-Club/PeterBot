@@ -1,0 +1,58 @@
+# Worker-guest stack for the dedicated Peter VM (PETER-12). Runs ONLY the
+# trusted runner supervisor inside the guest; the Discord gateway, model server,
+# and all state stay on P910. Secrets come from a root-only .env next to it
+# (never in Git).
+#
+# Network contract (change docs/worker-vm.md + peterbot-vm-firewall.sh +
+# peterbot-worker-vm-setup.sh together):
+#   peterbot_workers  192.168.240.0/24 bridge named `pbworkers`, created
+#     EXTERNALLY by guest setup — workers join it, the runner NEVER does, so
+#     even with the guest docker socket the runner shares no L2 with them.
+#     Guest FORWARD wall allows only worker -> broker alias.
+#   peterbot_control  bridge named `ctl0` on 192.168.242.0/24 (never
+#     overlapping virbr-ctl). The runner joins it; it shares no L2 with
+#     `pbworkers`, so worker↔runner traffic is impossible even with the socket.
+#   192.168.241.2     guest vNIC2 on host-only virbr-ctl; runner 8780 published
+#     on this address ONLY (never 0.0.0.0).
+services:
+  runner:
+    image: ${PETERBOT_RUNNER_IMAGE:?Set a built runner image}
+    container_name: peterbot-hermes-runner
+    restart: unless-stopped
+    environment:
+      PETERBOT_RUNNER_TOKEN: ${PETERBOT_RUNNER_TOKEN}
+      PETERBOT_WORKER_IMAGE: ${PETERBOT_WORKER_IMAGE:?Set a built worker image}
+      # Workers join the EXTERNAL bridge; the runner never attaches to it.
+      # The guest-local docker socket still supervises them (API by name).
+      PETERBOT_WORKER_NETWORK: peterbot_workers
+      PETERBOT_RUNNER_SCOPE: peterbot
+      # One worker at a time: matches the gateway's single foreground slot.
+      PETERBOT_RUNNER_CONCURRENCY: 1
+      PETERBOT_RUNNER_TIMEOUT: 1230
+      PETERBOT_WORKER_PROFILE: ${PETERBOT_WORKER_PROFILE:-build}
+    # Guest-local Docker socket only: the runner supervises workers inside THIS
+    # VM; P910's socket is physically unreachable from here.
+    volumes: ['/var/run/docker.sock:/var/run/docker.sock']
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,size=64m']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    ports:
+      # Control API reachable only from the virbr-ctl segment (P910 gateway).
+      - '192.168.241.2:8780:8780'
+    networks:
+      control: {}
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8780/health',timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+networks:
+  # Pre-created EXTERNAL networks (peterbot-worker-vm-setup.sh owns the bridge
+  # name, subnet and IPv6 posture; compose must not invent parallel ones).
+  control:
+    name: peterbot_control
+    external: true

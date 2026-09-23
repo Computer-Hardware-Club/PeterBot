@@ -1,14 +1,96 @@
-FROM python:3.12-slim
+# Digest of python:3.12-slim multi-arch manifest, inspected 2026-09-22 with
+# `docker buildx imagetools inspect python:3.12-slim`; re-resolve the tag when bumping.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HERMES_SAFE_MODE=1
-RUN apt-get update && apt-get install -y --no-install-recommends git bash nodejs npm ripgrep ca-certificates \
+# Existing Python/Node tooling retained. gcc + libc6-dev are the linker/link-args
+# prerequisite rustc needs for *-unknown-linux-gnu targets; curl only fetches the
+# pinned toolchain at build time (the worker itself has no egress).
+RUN apt-get update && apt-get install -y --no-install-recommends git bash nodejs npm ripgrep ca-certificates curl gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Pinned Rust toolchain (PETER-12). Provenance: rustc 1.98.1 (cargo package
+# 0.99.0; since Rust 1.40 `cargo --version` reports the release, "cargo 1.98.1"),
+# from the dist archive dated 2026-09-03, exactly as listed in
+# https://static.rust-lang.org/dist/2026-09-03/channel-rust-stable.toml
+# (rustc git commit 48a229ceaefd4985c50990b14116b6d856af0985). The ARG hashes are
+# the sha256 values of the exact .tar.gz files from that manifest and the build
+# fails closed on mismatch. Installed without rustup: no per-user toolchain state,
+# no runtime self-update surface; the worker cannot upgrade its own image.
+# Bump procedure (operator-reviewed change, never runtime): fetch the new
+# channel-rust-stable.toml, update date/version/6 hashes, rebuild, re-run
+# tests/test_rust_worker.py and deploy/smoke_rust_worker.py.
+ARG TARGETARCH
+ARG RUST_DIST_DATE=2026-09-03
+ARG RUST_VERSION=1.98.1
+ARG RUSTC_SHA256_AMD64=a6e35741daaac7978e7f485b564a783d13b6740a1ecf3e80c2e71696ca5cabb2
+ARG RUSTC_SHA256_ARM64=c6998e0d7faa373ba9d571715dcd04626a7735619bc1c37cfcaadf6efffc1f74
+ARG CARGO_SHA256_AMD64=3f1215b2a3b88c7aaa008b561bd4f39d6c6672fa7821e562ab6ba1a6d6f37f61
+ARG CARGO_SHA256_ARM64=a464c555c6f3146ee6854d0c1f4da85f514519e70813de6df277ced0e188c471
+ARG STD_SHA256_AMD64=eddab0358cbd12aeb897716aab00d1db7b59696e85b9ac4982e72259a9a976b1
+ARG STD_SHA256_ARM64=779407b14507542581216d89eb9f3fbb232abbf3abcc15c365cb32fa0614e409
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) TRIPLE=x86_64-unknown-linux-gnu; RUSTC_SHA=$RUSTC_SHA256_AMD64; CARGO_SHA=$CARGO_SHA256_AMD64; STD_SHA=$STD_SHA256_AMD64;; \
+      arm64) TRIPLE=aarch64-unknown-linux-gnu; RUSTC_SHA=$RUSTC_SHA256_ARM64; CARGO_SHA=$CARGO_SHA256_ARM64; STD_SHA=$STD_SHA256_ARM64;; \
+      *) echo "Unsupported TARGETARCH=$TARGETARCH" >&2; exit 1;; \
+    esac; \
+    base=https://static.rust-lang.org/dist/$RUST_DIST_DATE; \
+    for item in rustc:$RUSTC_SHA cargo:$CARGO_SHA rust-std:$STD_SHA; do \
+      pkg=${item%%:*}; want=${item#*:}; \
+      curl -fsSLo /tmp/$pkg.tar.gz $base/$pkg-$RUST_VERSION-$TRIPLE.tar.gz; \
+      echo "$want  /tmp/$pkg.tar.gz" | sha256sum -c -; \
+      tar -xzf /tmp/$pkg.tar.gz -C /usr/local --strip-components=2; \
+      rm /tmp/$pkg.tar.gz; \
+    done; \
+    rustc --version | grep -q "rustc $RUST_VERSION"; \
+    cargo --version | grep -q "cargo $RUST_VERSION"; \
+    # Build-time proof that the linker and std actually work in this image:
+    printf 'fn main(){print!("{}",2*21);}' > /tmp/probe.rs; \
+    rustc -O -o /tmp/probe /tmp/probe.rs; \
+    test "$(/tmp/probe)" = 42; \
+    rm /tmp/probe.rs /tmp/probe
+# Rust builds stay offline. PETER-13 changes what "offline" means for crates: the
+# worker never fetches a registry itself; fetch_dependency stages hash-verified
+# crates from the immutable cache below (or the authenticated gateway broker) into
+# a cargo local-registry, and cargo --offline resolves only from there.
+# CARGO_HOME is pinned so fetch_dependency's local-registry and every cargo
+# invocation in the task shell resolve the same tree regardless of HOME.
+ENV CARGO_NET_OFFLINE=true CARGO_HOME=/tmp/hermes/cargo
 WORKDIR /app
 COPY requirements-hermes.txt ./
 RUN python -m pip install --no-cache-dir --src /opt/upstream -r requirements-hermes.txt
-COPY peterbot/__init__.py peterbot/hermes_worker.py ./peterbot/
+COPY peterbot/__init__.py peterbot/hermes_worker.py peterbot/package_access.py ./peterbot/
 # Isolated Python (-I) must import trusted application code, never workspace code.
 RUN python -c "import site,pathlib; pathlib.Path(site.getsitepackages()[0], 'peterbot.pth').write_text('/app\\n')" \
     && mkdir -p /workspace && chown 10000:10000 /workspace
+
+# PETER-13 immutable dependency cache. Download URLs, sha256 and sizes come from
+# peterbot/package_access.py PACKAGE_INVENTORY (one pinned source of truth,
+# pinned against the live registries); every byte is verified before it is kept
+# and the build fails closed on mismatch. Build-time curl is not worker egress:
+# the worker container itself still has no network path to any registry.
+# Bump procedure: edit PACKAGE_INVENTORY, rebuild, re-run
+# tests/test_package_access.py and the worker package smoke.
+RUN set -eux; \
+    python - <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+sys.path.insert(0, "/app")
+from peterbot.package_access import PACKAGE_INVENTORY
+root = pathlib.Path("/opt/peterbot/deps")
+for folder in ("wheels", "crates"):
+    (root / folder).mkdir(parents=True)
+for entry in PACKAGE_INVENTORY:
+    folder = "wheels" if entry["registry"] == "pypi" else "crates"
+    path = root / folder / entry["filename"]
+    subprocess.run(["curl", "-fsSLo", str(path), entry["url"]], check=True)
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != entry["sha256"] or len(data) != entry["size"]:
+        raise SystemExit(f"cache verification failed: {entry['name']}")
+(root / "manifest.json").write_text(
+    json.dumps({"version": 1, "packages": [dict(e) for e in PACKAGE_INVENTORY]},
+               indent=1, sort_keys=True) + "\n")
+PY
+RUN chown -R root:root /opt/peterbot && chmod -R a-w /opt/peterbot && chmod -R a+rX /opt/peterbot/deps
 USER 10000:10000
 WORKDIR /workspace
 ENTRYPOINT ["python", "-I", "-m", "peterbot.hermes_worker"]

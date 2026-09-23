@@ -1,6 +1,8 @@
 # Only this trusted supervisor receives the Docker socket, on a control-only network.
-FROM docker:28.4.0-cli AS docker_cli
-FROM python:3.12-slim
+FROM docker:28.4.0-cli@sha256:6a73c9433f2ba4279815be1e60f5739288b939dda1e48151d8c393537802de37 AS docker_cli
+# Digest of python:3.12-slim multi-arch manifest, inspected 2026-09-22 with
+# `docker buildx imagetools inspect python:3.12-slim`; same pin as the worker image.
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY --from=docker_cli /usr/local/bin/docker /usr/local/bin/docker

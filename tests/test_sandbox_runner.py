@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import tarfile
@@ -71,6 +72,54 @@ def test_worker_container_has_only_fixed_capabilities():
     assert TOKEN not in " ".join(args)
     assert args[-3:] == [SETTINGS.image, "-c", "import time; time.sleep(1900)"]
     assert len([a for a in args if a.startswith("/workspace:rw")]) == 1
+
+
+
+@pytest.mark.parametrize("profile,limits", [
+    ("small", ("96", "1", "1g", "size=256m", "size=128m")),
+    ("standard", ("128", "2", "2g", "size=512m", "size=256m")),
+    ("build", ("192", "4", "4g", "size=2g", "size=512m")),
+])
+def test_resource_profiles_bind_ceilings_without_request_input(profile, limits):
+    settings = sr.Settings(TOKEN, SETTINGS.image, SETTINGS.network, resource_profile=profile)
+    args = sr.worker_args(settings, "peterbot-test-" + JOB_ID)
+    assert args[args.index("--pids-limit") + 1] == limits[0]
+    assert args[args.index("--cpus") + 1] == limits[1]
+    assert args[args.index("--memory") + 1] == args[args.index("--memory-swap") + 1] == limits[2]
+    tmpfs = sorted(argument for argument in args if argument.startswith(("/tmp:", "/workspace:")))
+    assert len(tmpfs) == 2
+    # Scratch stays noexec; workspace is explicitly exec so compiled fixtures run.
+    assert tmpfs[0].startswith(f"/tmp:rw,nosuid,nodev,noexec,{limits[4]},")
+    assert tmpfs[1].startswith(f"/workspace:rw,nosuid,nodev,exec,{limits[3]},")
+    assert f"io.peterbot.profile={profile}" in args
+
+
+def test_unknown_profiles_rejected_and_requests_cannot_widen_containers():
+    with pytest.raises(ValueError, match="resource profile"):
+        sr.Settings(TOKEN, SETTINGS.image, SETTINGS.network, resource_profile="unrestricted")
+
+    created = []
+
+    async def fake_docker(args, **kwargs):
+        created.append(args)
+        if sr.RESULT_READ_SOURCE in args:
+            return b'{"answer":"Done"}'
+        if "/bin/tar" in args:
+            return archive([])
+        return b""
+
+    async def exercise():
+        with patch.object(sr, "docker", fake_docker):
+            async with TestClient(TestServer(sr.create_app(SETTINGS, cleanup_on_start=False))) as client:
+                response = await client.post("/run", headers={"Authorization": "Bearer " + TOKEN},
+                    json={"job_id": JOB_ID, "request": {"task": "x", "resource_profile": "unrestricted",
+                          "cpus": "64", "memory": "64g", "privileged": True}})
+                assert (await response.json())["status"] == "completed"
+    asyncio.run(exercise())
+    run = created[0]
+    assert run[run.index("--cpus") + 1] == SETTINGS.profile.cpus
+    assert run[run.index("--memory") + 1] == SETTINGS.profile.memory
+    assert not {"--privileged"} & set(run)
 
 
 @pytest.mark.parametrize("kind", [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE,
@@ -166,7 +215,9 @@ def test_run_returns_artifacts_and_always_cleans_container():
                 response = await client.post("/run", headers={"Authorization": "Bearer " + TOKEN},
                                              json={"job_id": JOB_ID, "request": {"task": "hello", "image": "ignored"}})
                 assert await response.json() == {"status": "completed", "answer": "Done",
-                                                 "artifacts": [{"name": "report.txt", "data_base64": "cmVzdWx0"}]}
+                                                 "artifacts": [{"name": "report.txt", "data_base64": "cmVzdWx0"}],
+                                                 "project_files": [{"name": "report.txt", "data_base64": "cmVzdWx0",
+                                                                    "sha256": hashlib.sha256(b"result").hexdigest()}]}
     asyncio.run(exercise())
     assert payloads == [{"task": "hello", "image": "ignored"}]
     assert all(call[0] != "cp" for call in calls)
@@ -206,7 +257,7 @@ def test_cancel_and_busy_limits():
 
     async def fake_docker(args, **kwargs):
         calls.append(args)
-        if args[0] == "exec":
+        if args[0] == "exec" and "peterbot.hermes_worker" in args:
             started.set()
             await asyncio.Event().wait()
         return b""
@@ -233,12 +284,69 @@ def test_cancel_and_busy_limits():
     assert calls[-1] == ["rm", "--force", f"peterbot-peterbot-{JOB_ID}"]
 
 
+def test_timeout_salvages_partial_artifacts():
+    """A timed-out worker's valid artifacts must survive teardown (PETER-14 gate)."""
+    partial = archive([("artifacts/half-written.rs", b"fn main() {}", tarfile.REGTYPE)])
+
+    async def fake_docker(args, **kwargs):
+        if args[0] == "exec" and "peterbot.hermes_worker" in args:
+            await asyncio.Event().wait()
+        if "/bin/tar" in args:
+            return partial
+        return b""
+
+    async def exercise():
+        settings = sr.Settings(TOKEN, SETTINGS.image, SETTINGS.network, timeout=1)
+        with patch.object(sr, "docker", fake_docker):
+            async with TestClient(TestServer(sr.create_app(settings, cleanup_on_start=False))) as client:
+                response = await client.post("/run", headers={"Authorization": "Bearer " + TOKEN},
+                                             json={"job_id": JOB_ID, "request": {}})
+                result = await response.json()
+                assert result["status"] == "timeout"
+                assert result["artifacts"] == [{"name": "half-written.rs",
+                                                "data_base64": base64.b64encode(b"fn main() {}").decode()}]
+                assert result["project_files"][0]["sha256"] == hashlib.sha256(b"fn main() {}").hexdigest()
+    asyncio.run(exercise())
+
+
+def test_cancel_salvages_partial_artifacts():
+    cancel_id = uuid.uuid4().hex
+    started = None
+    partial = archive([("artifacts/partial.txt", b"half", tarfile.REGTYPE)])
+
+    async def fake_docker(args, **kwargs):
+        if args[0] == "exec" and "peterbot.hermes_worker" in args:
+            started.set()
+            await asyncio.Event().wait()
+        if "/bin/tar" in args:
+            return partial
+        return b""
+
+    async def exercise():
+        nonlocal started
+        started = asyncio.Event()
+        with patch.object(sr, "docker", fake_docker):
+            async with TestClient(TestServer(sr.create_app(SETTINGS, cleanup_on_start=False))) as client:
+                headers = {"Authorization": "Bearer " + TOKEN}
+                task = asyncio.create_task(client.post("/run", headers=headers,
+                                                       json={"job_id": cancel_id, "request": {}}))
+                await asyncio.wait_for(started.wait(), 2)
+                cancel = await client.post("/cancel", headers=headers, json={"job_id": cancel_id})
+                assert await cancel.json() == {"cancelled": True}
+                response = await asyncio.wait_for(task, 5)
+                body = await response.json()
+                assert body["status"] == "cancelled"
+                assert body["artifacts"] == [{"name": "partial.txt", "data_base64": "aGFsZg=="}]
+                assert body["project_files"][0]["name"] == "partial.txt"
+    asyncio.run(exercise())
+
+
 def test_timeout_cleans_worker():
     calls = []
 
     async def fake_docker(args, **kwargs):
         calls.append(args)
-        if args[0] == "exec":
+        if args[0] == "exec" and "peterbot.hermes_worker" in args:
             await asyncio.Event().wait()
         return b""
 
@@ -251,7 +359,6 @@ def test_timeout_cleans_worker():
                 assert (await response.json())["status"] == "timeout"
     asyncio.run(exercise())
     assert calls[-1][0] == "rm"
-
 
 def test_failed_cleanup_disables_new_jobs_and_health():
     async def fake_docker(args, **kwargs):
@@ -298,7 +405,7 @@ def test_client_disconnect_removes_worker():
     cleaned = None
 
     async def fake_docker(args, **kwargs):
-        if args[0] == "exec":
+        if args[0] == "exec" and "peterbot.hermes_worker" in args:
             started.set()
             await asyncio.Event().wait()
         if args[0] == "rm":
@@ -424,3 +531,8 @@ def test_nested_artifacts_are_bundled_to_preserve_project_paths():
     with zipfile.ZipFile(io.BytesIO(base64.b64decode(result[0]['data_base64']))) as archive:
         assert set(archive.namelist())==set(files)
         assert archive.read('site/assets/style.css')==files['site/assets/style.css']
+    project_files = sr.encode_project_files(files)
+    assert {item['name'] for item in project_files} == set(files)
+    assert all(hashlib.sha256(files[item['name']]).hexdigest() == item['sha256']
+               for item in project_files)
+    assert sr.MAX_REQUEST == 12 * 1024 * 1024

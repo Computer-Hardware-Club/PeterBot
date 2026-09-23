@@ -1,0 +1,57 @@
+<!-- Dedicated Peter worker guest (PETER-12). TEMPLATE: deploy/vm/peterbot-worker-vm-provision.sh
+     substitutes @DISK@, @MAC@ and @SEED_ISO@, then virsh defines it. Sizing: the
+     `build` worker profile is 4 vCPU / 4 GiB; 6 vCPU / 12 GiB gives runner+OS
+     headroom. The desktop VM's disks/networks are untouched.
+     vNIC1: default NAT — setup-time apt/pip/docker downloads ONLY (the guest OS
+     needs it during first boot); detach afterwards if the guest must hold no
+     internet path (see docs "posture B").
+     vNIC2: the host-only virbr-ctl bridge; the guest assigns itself the static
+     192.168.241.2 from cloud-init — every production path (runner API for the
+     gateway, broker DNAT toward P910) rides this and nothing else.
+     Seed filesystem: cloud-init NoCloud (user-data, separate network-config
+     and setup script payload). Expose it as virtio block: the smaller Debian
+     genericcloud kernel boots virtio, but may omit the SATA CD-ROM driver. -->
+<domain type='kvm'>
+  <name>peterbot-worker</name>
+  <memory unit='GiB'>12</memory>
+  <vcpu placement='static'>6</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features><acpi/><apic/><vmport/><pae/></features>
+  <clock offset='utc'/>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='@DISK@'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source file='@SEED_ISO@'/>
+      <target dev='vdb' bus='virtio'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <!-- provision script pins <mac> here (must precede <source> per RNG) -->
+      @MAC_NAT@
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <interface type='network'>
+      <mac address='@MAC@'/>
+      <source network='virbr-ctl'/>
+      <model type='virtio'/>
+    </interface>
+    <channel type='unix'>
+      <!-- libvirt generates the socket path from the target name -->
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <console type='pty'/>
+  </devices>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+</domain>

@@ -88,5 +88,13 @@ def test_complete_check_report(monkeypatch, failed_check):
     result = isolation.run_checks(env)
     assert result["passed"] is (failed_check is None)
     assert ("192.168.65.9", 8780) in hosts
-    assert len(result["checks"]) == 14
+    assert len(result["checks"]) == 15
+    assert {check["check"] for check in result["checks"]} >= {"toolchain_write_denied"}
+    # The toolchain probe must require denial: writable /usr/local/bin fails the run.
+    paths = []
+    def write_probe(path):
+        paths.append(path)
+        return path in ("/workspace", "/usr/local/bin")
+    monkeypatch.setattr(isolation, "probe_write", write_probe)
+    assert not isolation.run_checks({})["passed"]
     assert "must-not-print" not in str(result)
