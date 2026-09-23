@@ -46,7 +46,8 @@ def register_agent_commands(bot, service):
             if not interaction.guild:
                 raise ValueError('Use this in the club server.')
             await service.cancel(task_id,interaction.guild.id,interaction.user.id)
-            await safe_send_interaction_message(interaction,'Task cancelled.')
+            await safe_send_interaction_message(interaction,
+                'Cancellation requested. I’ll stop the worker and keep any valid partial files for review.')
         except (ValueError, PolicyDenied) as exc:
             await safe_send_interaction_message(interaction,str(exc))
 

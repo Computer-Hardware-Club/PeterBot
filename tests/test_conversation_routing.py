@@ -5,7 +5,7 @@ import time
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -83,6 +83,22 @@ def test_public_submission_cannot_continue_private_task(tmp_path):
                                      prompt="Tell everyone", parent_id=private["id"], in_channel=True)
             channel.send.assert_not_awaited()
             channel.create_thread.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+def test_owner_saying_stop_in_task_thread_requests_cancellation_without_model(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            job = gateway.jobs.create(guild_id=10, user_id=1, channel_id=20,
+                source_message_id=30, prompt='Long task', delivery_mode='private')
+            message = SimpleNamespace(id=31, guild=channel.guild, channel=channel,
+                author=SimpleNamespace(id=1), attachments=[], reply=AsyncMock())
+            await gateway.respond_to_message(message, 'stop this task')
+            assert gateway.jobs.get(job['id'])['status'] == 'cancelled'
+            assert message.reply.await_count == 1
+            assert any(url.endswith('/cancel') for url, _ in gateway.session.calls)
+            assert not any(url.endswith('/chat/completions') for url, _ in gateway.session.calls)
+
     asyncio.run(scenario())
 
 
@@ -169,14 +185,32 @@ def test_mention_uses_conversation_entry_point_without_task_link(setup_handlers)
     runtime.llm_client.call_chat.assert_not_awaited()
 
 
+def test_gateway_passes_remaining_budget_and_attachment_shape_to_fast_model(tmp_path, monkeypatch):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, _):
+            fast = AsyncMock(return_value='Ready.')
+            monkeypatch.setattr('peterbot.conversation.reply_or_use_tools', fast)
+            answer = await gateway.conversational_reply(
+                Principal(10, 1, 20, (100,)), 'Check this file', [],
+                budget_seconds=12.5, has_attachments=True)
+            assert answer == 'Ready.'
+            assert fast.await_args.kwargs['budget_seconds'] == 12.5
+            assert fast.await_args.kwargs['has_attachments'] is True
+    asyncio.run(scenario())
+
+
 def test_ask_keeps_normal_reply_when_hermes_is_enabled(setup_handlers):
     bot, runtime = setup_handlers
-    runtime.hermes = SimpleNamespace(eligible=AsyncMock(return_value=True), submit=AsyncMock())
+    runtime.hermes = SimpleNamespace(
+        principal=AsyncMock(return_value=Principal(10, 1, 20, (100,))),
+        conversational_reply=AsyncMock(return_value='Here is the answer.'),
+        conversations=SimpleNamespace(append_turn=Mock()), submit=AsyncMock())
     request = interaction()
     request.channel_id = request.channel.id
     asyncio.run(bot.tree.callbacks["ask"](request, "Tell me a joke"))
     runtime.hermes.submit.assert_not_awaited()
-    runtime.llm_client.call_chat.assert_awaited_once()
+    runtime.hermes.conversational_reply.assert_awaited_once()
+    runtime.llm_client.call_chat.assert_not_awaited()
     assert handlers.send_chunked_followup.await_args.args[1] == "Here is the answer."
 
 
@@ -212,6 +246,25 @@ def test_conversation_replies_directly_or_escalates_visibly(tmp_path, answer):
                 gateway.submit.assert_not_awaited()
                 message.reply.assert_awaited_once()
                 assert message.reply.await_args.args[0] == answer
+    asyncio.run(scenario())
+
+
+def test_failed_work_admission_resolves_the_one_visible_status(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            status = SimpleNamespace(id=777, edit=AsyncMock())
+            channel.send.return_value = status
+            gateway.conversational_reply = AsyncMock(return_value=None)
+            gateway.submit = AsyncMock(side_effect=ValueError('The queue is full.'))
+            message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
+                author=SimpleNamespace(id=1, display_name='Officer', bot=False),
+                content='Build something', attachments=[], reply=AsyncMock(),
+                created_at=datetime.now(timezone.utc))
+            await gateway.respond_to_message(message, 'Build something')
+            channel.send.assert_awaited_once()
+            status.edit.assert_awaited_once_with(content='The queue is full.')
+            message.reply.assert_not_awaited()
+
     asyncio.run(scenario())
 
 
@@ -255,28 +308,27 @@ def test_fast_model_answers_or_hands_off_without_exposing_reasoning(tmp_path, ha
             if handoff:
                 message["tool_calls"] = [{"id": "call-1", "type": "function",
                                           "function": {"name": "use_tools", "arguments": '{"reason":"Need tools"}'}}]
-            gateway.session.result = {"choices": [{"message": message}]}
+            gateway.session.result = {"choices": [{"message": message,
+                "finish_reason": "tool_calls" if handoff else "stop"}]}
             reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi", [])
             assert reply == (None if handoff else "Hey.")
             url, request = gateway.session.calls[0]
             assert url == "http://model/v1/chat/completions"
             assert request["allow_redirects"] is False
-            assert request["json"]["chat_template_kwargs"]["enable_thinking"] is True
+            assert request["json"]["chat_template_kwargs"]["enable_thinking"] is False
             assert [tool["function"]["name"] for tool in request["json"]["tools"]] == ["use_tools"]
             assert gateway.jobs.pending() == []
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("name,arguments", [("terminal", "{}"), ("use_tools", '{"user_id":2}')])
-def test_invented_fast_model_tool_decision_hands_off_instead_of_erroring(tmp_path, name, arguments):
-    """A tool name or argument shape the fast model invented is a model wobble, not a
-    member-facing error: hand the request to the sandbox, which re-checks authority and
-    honours only its own allowlist."""
+def test_invented_fast_model_tool_decision_never_hands_off(tmp_path, name, arguments):
+    """An invented tool name or argument shape must not authorize sandbox work."""
     async def scenario():
         async with conversation_gateway(tmp_path) as (gateway, _):
             gateway.session.result = {"choices": [{"message": {"tool_calls": [
                 {"function": {"name": name, "arguments": arguments}}]}}]}
             reply = await gateway.conversational_reply(Principal(10, 1, 20, (100,)), "Hi", [])
-            assert reply is None
+            assert isinstance(reply, str) and reply
             assert gateway.jobs.pending() == []
     asyncio.run(scenario())

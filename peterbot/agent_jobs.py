@@ -60,6 +60,9 @@ LEGAL_PREDECESSORS: dict[str, frozenset[str]] = {
 # After this many failed Discord attempts a result stops polling the gateway and
 # is marked `exhausted` for operator review instead of retrying forever.
 DELIVERY_ATTEMPT_LIMIT = 12
+PROGRESS_STAGES = frozenset({'starting', 'working', 'researching', 'running_code',
+                             'reading_files', 'editing_files', 'checking_memory', 'calculating',
+                             'preparing_answer'})
 
 
 def now() -> str:
@@ -82,7 +85,9 @@ class JobStore:
         for name, definition in {'input_files':"TEXT NOT NULL DEFAULT '[]'", 'delivery_cursor':'INTEGER NOT NULL DEFAULT 0',
                                  'delivery_mode':"TEXT NOT NULL DEFAULT 'private'", 'context':"TEXT NOT NULL DEFAULT '[]'",
                                  'delivery_status':"TEXT NOT NULL DEFAULT 'pending'", 'delivery_attempts':'INTEGER NOT NULL DEFAULT 0',
-                                 'delivery_receipts':"TEXT NOT NULL DEFAULT '[]'", 'status_message_id':'INTEGER'}.items():
+                                 'delivery_receipts':"TEXT NOT NULL DEFAULT '[]'", 'status_message_id':'INTEGER',
+                                 'project_id':'TEXT', 'stage':"TEXT NOT NULL DEFAULT 'queued'",
+                                 'stage_seq':"INTEGER NOT NULL DEFAULT 0"}.items():
             if name not in columns:
                 self.db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
         # Ingress reservations map one Discord source message to one job so a
@@ -92,8 +97,13 @@ class JobStore:
             job_id TEXT, claimed_at TEXT NOT NULL,
             PRIMARY KEY (guild_id, source_message_id))''')
         with self.db:
-            self.db.execute("UPDATE jobs SET status='failed',answer='Task submission was interrupted.',updated_at=? WHERE status='preparing'",(now(),))
-            self.db.execute("UPDATE jobs SET status='interrupted', answer='The gateway restarted during this task. Use /continue_task to resume from the saved objective.', updated_at=? WHERE status='running'", (now(),))
+            # The old schema tracked successful sends only with delivered=1.
+            # Repair both first-time and interrupted migrations without
+            # changing explicit withheld/unknown receipts.
+            self.db.execute("UPDATE jobs SET delivery_status='delivered'"
+                            " WHERE delivered=1 AND delivery_status='pending'")
+            self.db.execute("UPDATE jobs SET status='failed',stage='failed',answer='Task submission was interrupted.',updated_at=? WHERE status='preparing'",(now(),))
+            self.db.execute("UPDATE jobs SET status='interrupted',stage='interrupted', answer='The gateway restarted during this task. Use /continue_task to resume from the saved objective.', updated_at=? WHERE status='running'", (now(),))
             # A crash mid-delivery leaves an ambiguous send: the in-flight
             # chunk may or may not have reached Discord. Freeze it as `unknown`
             # for reconciliation instead of resending blindly; the cursor and
@@ -109,11 +119,15 @@ class JobStore:
 
     def create(self, *, guild_id: int, user_id: int, channel_id: int,
                source_message_id: int, prompt: str, parent_id: str | None = None, input_files: list | None = None, ready: bool = True, delivery_mode: str = 'private', context: list | None = None,
-               ingress: tuple[int, int] | None = None, status_message_id: int | None = None) -> dict:
+               ingress: tuple[int, int] | None = None, status_message_id: int | None = None,
+               project_id: str | None = None) -> dict:
         if not prompt.strip() or len(prompt) > 16000:
             raise ValueError('Please use a task description between 1 and 16,000 characters.')
         if delivery_mode not in {'private','channel'}:
             raise ValueError('Invalid delivery mode')
+        if project_id is not None and (not isinstance(project_id, str) or len(project_id) != 32
+                                    or any(char not in '0123456789abcdef' for char in project_id)):
+            raise ValueError('Invalid project id')
         job_id = uuid.uuid4().hex
         with self.db:
             # Acquire the SQLite writer lock before counting. A context manager
@@ -122,8 +136,9 @@ class JobStore:
             self.check_capacity(user_id)
             self.db.execute('INSERT INTO jobs (id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
                             (job_id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,QUEUED if ready else PREPARING,now(),now()))
-            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=?,status_message_id=? WHERE id=?',
-                            (json.dumps(input_files or []),delivery_mode,json.dumps(context or []),status_message_id,job_id))
+            self.db.execute('UPDATE jobs SET input_files=?,delivery_mode=?,context=?,status_message_id=?,project_id=?,stage=? WHERE id=?',
+                            (json.dumps(input_files or []),delivery_mode,json.dumps(context or []),status_message_id,
+                             project_id,QUEUED if ready else PREPARING,job_id))
             if ingress is not None:
                 # Job insertion and ingress binding share one transaction: no
                 # crash window can leave a committed job whose reservation is
@@ -133,6 +148,48 @@ class JobStore:
                 if not cur.rowcount:
                     self.db.execute('INSERT INTO ingress (guild_id,source_message_id,job_id,claimed_at) VALUES (?,?,?,?)',
                                     (ingress[0], ingress[1], job_id, now()))
+        return self.get(job_id)
+
+    def link_project(self, job_id: str, project_id: str) -> bool:
+        """Bind a completed job to the manifest its artifacts were saved in."""
+        if not isinstance(project_id, str) or len(project_id) != 32 \
+                or any(char not in '0123456789abcdef' for char in project_id):
+            raise ValueError('Invalid project id')
+        with self.db:
+            changed = self.db.execute(
+                'UPDATE jobs SET project_id=?,updated_at=? WHERE id=? AND (project_id IS NULL OR project_id=?)',
+                (project_id, now(), job_id, project_id))
+        return changed.rowcount == 1
+
+    def record_fast_answer(self, *, guild_id: int, user_id: int, channel_id: int,
+                           source_message_id: int, prompt: str, answer: str,
+                           status_message_id: int | None = None) -> dict:
+        """Durable delivery for a long fast reply after its foreground turn ends.
+
+        The model work already happened under the one foreground slot. This
+        row never enters the task queue, so a full work queue cannot discard
+        the answer, and the usual delivery cursor handles every Discord chunk.
+        """
+        if not prompt.strip() or not answer.strip() or len(prompt) > 16000:
+            raise ValueError('A completed answer and source prompt are required')
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            prior = self.db.execute('SELECT job_id FROM ingress WHERE guild_id=? AND source_message_id=?',
+                                    (guild_id, source_message_id)).fetchone()
+            if prior is not None:
+                if prior['job_id']:
+                    return self.get(prior['job_id'])
+                raise ValueError('That source message is still being submitted')
+            job_id = uuid.uuid4().hex
+            timestamp = now()
+            self.db.execute('''INSERT INTO jobs
+                (id,guild_id,user_id,channel_id,source_message_id,prompt,parent_id,
+                 status,stage,answer,delivery_mode,status_message_id,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,NULL,'completed','completed',?,'channel',?,?,?)''',
+                (job_id,guild_id,user_id,channel_id,source_message_id,prompt,
+                 answer[:24000],status_message_id,timestamp,timestamp))
+            self.db.execute('INSERT INTO ingress (guild_id,source_message_id,job_id,claimed_at) VALUES (?,?,?,?)',
+                            (guild_id,source_message_id,job_id,timestamp))
         return self.get(job_id)
 
     def check_capacity(self, user_id: int) -> None:
@@ -171,8 +228,19 @@ class JobStore:
     def claim(self, job_id: str) -> bool:
         """Atomically admit one queued job; False if anyone else claimed it first."""
         with self.db:
-            cur = self.db.execute("UPDATE jobs SET status=?,updated_at=? WHERE id=? AND status=?", (RUNNING, now(), job_id, QUEUED))
+            cur = self.db.execute("UPDATE jobs SET status=?,stage='starting',stage_seq=0,updated_at=? WHERE id=? AND status=?", (RUNNING, now(), job_id, QUEUED))
         return cur.rowcount == 1
+
+    def update_progress(self, job_id: str, *, seq: int, stage: str) -> bool:
+        """Accept only a newer fixed stage while this job still owns execution."""
+        if stage not in PROGRESS_STAGES or type(seq) is not int or not 1 <= seq <= 1000:
+            raise ValueError('Invalid progress event')
+        with self.db:
+            changed = self.db.execute(
+                "UPDATE jobs SET stage=?,stage_seq=?,updated_at=?"
+                " WHERE id=? AND status='running' AND stage_seq<?",
+                (stage, seq, now(), job_id, seq))
+        return changed.rowcount == 1
 
     def transition(self, job_id: str, to: str, *, answer: str | None = None,
                    artifacts: list | None = None) -> bool:
@@ -182,7 +250,7 @@ class JobStore:
         froms = sorted(LEGAL_PREDECESSORS[to])
         if not froms:
             return False
-        fields = {'status': to, 'updated_at': now()}
+        fields = {'status': to, 'stage': to, 'updated_at': now()}
         if answer is not None:
             fields['answer'] = answer[:24000]
         if artifacts is not None:
@@ -196,7 +264,7 @@ class JobStore:
     def abandon_submission(self, job_id: str, answer: str) -> None:
         """Fail a never-admitted submission; acknowledged without any delivery."""
         with self.db:
-            self.db.execute("UPDATE jobs SET status='failed',answer=?,delivered=1,delivery_status='withheld',updated_at=?"
+            self.db.execute("UPDATE jobs SET status='failed',stage='failed',answer=?,delivered=1,delivery_status='withheld',updated_at=?"
                             + " WHERE id=? AND status IN ('preparing','queued')", (answer[:24000], now(), job_id))
 
     def undelivered(self) -> list[dict]:

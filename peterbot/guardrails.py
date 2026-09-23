@@ -42,6 +42,12 @@ class RequestGuard:
     Quotas count admitted requests, including requests that subsequently fail.
     They survive release and expire exactly 60 seconds after admission. This
     state is per process and resets on restart; run one bot process.
+
+    With the foreground scheduler (PETER-04), ``preflight`` is the ingress
+    gate — validation only, no state touched, so a queued request is rejected
+    before admission without occupying the single slot. ``acquire`` is then
+    called inside the admitted work, where the concurrency check is
+    redundant-but-harmless and the per-minute quota still applies.
     """
 
     _MAX_QUOTA_ENTRIES = 10_000
@@ -87,9 +93,10 @@ class RequestGuard:
         records[identity].append(now)
         records.move_to_end(identity)
 
-    def acquire(
+    def preflight(
         self, *, user_id: int, guild_id: int | None, prompt: str
     ) -> tuple[bool, str | None]:
+        """Ingress validation with no state change: no model, no slot, no quota."""
         if guild_id is None:
             if not self.limits.allow_dms:
                 return False, "Please ask me in the club server; DMs are disabled."
@@ -102,6 +109,14 @@ class RequestGuard:
             return False, "Please include a question or message."
         if len(prompt) > self.limits.max_prompt_chars:
             return False, f"Please keep your message to {self.limits.max_prompt_chars} characters or fewer."
+        return True, None
+
+    def acquire(
+        self, *, user_id: int, guild_id: int | None, prompt: str
+    ) -> tuple[bool, str | None]:
+        ok, reason = self.preflight(user_id=user_id, guild_id=guild_id, prompt=prompt)
+        if not ok:
+            return ok, reason
         if user_id in self._active_users:
             return False, "I'm still working on your previous request. Please wait for it to finish."
         if len(self._active_users) >= self.limits.max_concurrent:

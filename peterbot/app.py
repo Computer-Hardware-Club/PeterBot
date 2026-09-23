@@ -13,6 +13,7 @@ import discord
 from discord.ext import commands
 
 from .commands import register_handlers
+from .foreground import ForegroundScheduler
 from .config import AppConfig
 from .knowledge import load_knowledge_index
 from .llama_cpp_client import LlamaCppChatClient
@@ -34,7 +35,7 @@ def build_runtime(bot: commands.Bot, config: AppConfig) -> PeterBotRuntime:
         knowledge_file=config.knowledge_file,
         channel_profiles_file=config.channel_profiles_file,
     )
-    return PeterBotRuntime(
+    runtime = PeterBotRuntime(
         bot=bot,
         config=config,
         llm_client=LlamaCppChatClient(config),
@@ -50,6 +51,12 @@ def build_runtime(bot: commands.Bot, config: AppConfig) -> PeterBotRuntime:
             allow_dms=config.agent.allow_dms,
         )),
     )
+    # One foreground cognitive chain globally (PETER-04). The durable queue
+    # lives next to the task store when Hermes is on, so scheduler and job
+    # rows share one state directory; otherwise beside the reminder data.
+    state_dir = os.getenv("PETERBOT_STATE_DIR") or config.data_dir
+    runtime.foreground = ForegroundScheduler(str(Path(state_dir) / "foreground.sqlite3"))
+    return runtime
 
 
 def validate_config(config: AppConfig) -> bool:
@@ -119,7 +126,8 @@ def run_bot() -> None:
         from .hermes_settings import HermesSettings
         from .hermes_gateway import HermesGateway
         from .hermes_commands import register_agent_commands
-        runtime.hermes = HermesGateway(bot, config, HermesSettings.load(os.environ["PETERBOT_HERMES_CONFIG"]))
+        runtime.hermes = HermesGateway(bot, config, HermesSettings.load(os.environ["PETERBOT_HERMES_CONFIG"]),
+                                       foreground=runtime.foreground)
         runtime.hermes.knowledge = runtime.knowledge_index
         register_agent_commands(bot, runtime.hermes)
         original_close = bot.close
@@ -130,9 +138,24 @@ def run_bot() -> None:
             async with agent_close_lock:
                 if not agent_closed:
                     await runtime.hermes.close()
+                    await runtime.foreground.close()
+                    runtime.foreground.close_sync()
                     agent_closed = True
                 await original_close()
         bot.close = close_with_agent
+    else:
+        original_close = bot.close
+        fg_close_lock = asyncio.Lock()
+        fg_closed = False
+        async def close_with_foreground():
+            nonlocal fg_closed
+            async with fg_close_lock:
+                if not fg_closed:
+                    await runtime.foreground.close()
+                    runtime.foreground.close_sync()
+                    fg_closed = True
+                await original_close()
+        bot.close = close_with_foreground
     register_handlers(bot, runtime)
     register_signal_handlers(runtime)
 

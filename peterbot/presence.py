@@ -12,15 +12,15 @@ This module owns at most one member-facing message per turn:
 * it is edited in place as the work continues and finally *becomes* the answer, so the
   member reads one message instead of a stale placeholder above a reply.
 
-Only elapsed time and the current stage are reported. There is no fake percentage:
-the worker does not stream progress, and inventing one would be a lie.
+Only elapsed time and a fixed, authenticated worker stage are reported. There
+is no invented completion percentage or private reasoning text.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import discord
 
@@ -37,6 +37,13 @@ MIN_EDIT_SECONDS = 3.0
 # How often a running task refreshes its own status line.
 PROGRESS_EVERY_SECONDS = 20.0
 DEFAULT_SEND_CHARS = 1800
+STAGE_LABELS = {
+    'queued': 'queued', 'starting': 'starting', 'working': 'working through the request',
+    'researching': 'researching', 'running_code': 'running code',
+    'reading_files': 'reading files', 'editing_files': 'working on files',
+    'checking_memory': 'checking saved context',
+    'calculating': 'calculating', 'preparing_answer': 'preparing the answer',
+}
 
 
 class Presence:
@@ -57,6 +64,7 @@ class Presence:
         self._poster: Optional[asyncio.Task] = None
         self._last_edit = 0.0
         self._last_text = ''
+        self.partial_delivery = False
 
     @property
     def message_id(self) -> Optional[int]:
@@ -141,8 +149,9 @@ class Presence:
     async def finish(self, text: str) -> bool:
         """Turn the status message into the answer. Returns True if it delivered it.
 
-        False means no status message was ever posted, and the caller should reply the
-        ordinary way.
+        False means nothing was sent, or a later chunk failed. In the latter
+        case ``partial_delivery`` is true and callers must not replay the first
+        chunk. Long replies normally use the durable delivery cursor instead.
         """
         chunks = split_for_discord(text, self.max_chars)
         if self.message is None or not chunks:
@@ -163,7 +172,8 @@ class Presence:
             except discord.HTTPException:
                 log_with_context(logging.WARNING, 'Could not send the rest of the answer',
                                  error='HTTPException')
-                break
+                self.partial_delivery = True
+                return False
         return True
 
 
@@ -176,18 +186,23 @@ def elapsed_label(seconds: float) -> str:
 
 
 async def watch_task(presence: Presence, job_id: str, *, interval: float = PROGRESS_EVERY_SECONDS,
-                     status: str = 'running') -> None:
+                     status: str = 'running', status_getter: Callable[[], str] | None = None) -> None:
     """Keep a long task's status line honest until it is done.
 
-    Reports elapsed time and stage only; the worker does not stream progress, so
-    anything more precise would be invented.
+    A trusted getter reads only a fixed stage key, never worker-generated text.
     """
     started = time.monotonic()
     try:
         while True:
             await asyncio.sleep(interval)
-            await presence.show(f'still working — {elapsed_label(time.monotonic() - started)} in '
-                                f'({status}). I will post the result here.')
+            if status_getter is None:
+                text = (f'still working — {elapsed_label(time.monotonic() - started)} in '
+                        f'({status}). I will post the result here.')
+            else:
+                stage = status_getter()
+                label = STAGE_LABELS.get(stage, 'working')
+                text = f'{label} — {elapsed_label(time.monotonic() - started)} elapsed. I will post the result here.'
+            await presence.show(text)
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001 - a status wobble must never affect the task

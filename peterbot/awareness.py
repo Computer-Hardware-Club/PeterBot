@@ -65,6 +65,16 @@ class AwarenessRouter:
                 return "reply"
         if self.name.match(content) and not self.third_person.match(content):
             return "name"
+        # The owner's private task thread is itself the addressing context:
+        # a natural follow-up there continues that task even after the lease
+        # expired and without a name or reply. Only the bot-created private
+        # thread qualifies; the job lookup downstream is owner-bound, so a
+        # member of someone else's thread still reaches no session.
+        channel = getattr(message, "channel", None)
+        is_private = getattr(channel, "is_private", None)
+        if callable(is_private) and is_private() \
+                and getattr(channel, "owner_id", None) == self.bot_user_id:
+            return "thread"
         key = self._key(message)
         if self.leases.get(key, 0) <= self.clock():
             self.leases.pop(key, None)

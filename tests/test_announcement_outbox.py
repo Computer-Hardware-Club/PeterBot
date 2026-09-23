@@ -119,3 +119,14 @@ def test_future_outbox_schema_fails_closed(outbox, tmp_path):
     with pytest.raises(ValueError, match="newer"):
         AnnouncementOutbox(tmp_path / "outbox.sqlite3", outbox.policy,
                            {10: frozenset({30})})
+
+
+def test_receipt_conflict_can_freeze_pending_but_never_reopens_sent(outbox):
+    pending = propose(outbox)
+    assert outbox.mark_unknown(pending['id'])
+    assert outbox.pending() == []
+    sent = propose(outbox, intent=request(source=42))
+    assert outbox.begin_send(sent['id'], actor(), request(source=42), channel_is_private=True)
+    assert outbox.mark_sent(sent['id'], 55)
+    assert not outbox.mark_unknown(sent['id'])
+    assert outbox.get(sent['id'])['status'] == 'sent'

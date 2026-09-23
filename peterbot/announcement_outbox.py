@@ -134,7 +134,7 @@ class AnnouncementOutbox:
     def mark_unknown(self, action_id: str) -> bool:
         with self.db:
             changed = self.db.execute("UPDATE announcements SET status='unknown',updated_at=?"
-                                      " WHERE id=? AND status='sending'", (_now(), action_id))
+                                      " WHERE id=? AND status IN ('sending','pending')", (_now(), action_id))
         return changed.rowcount == 1
 
     def mark_denied(self, action_id: str) -> bool:

@@ -35,6 +35,19 @@ whose cleanup was never confirmed — the queue-holds-open condition an operator
 must reconcile manually. `jobs.oldest_active_age_seconds` measures only
 `preparing`/`queued`/`running` rows.
 
+The new gateway also exposes an on-demand `/diagnostics` route for live
+dependencies. It requires the protected runner token and returns only fixed
+status words for Discord, runner, model, and queue, plus the image revision and
+aggregate foreground counts. The check makes bounded health requests; it never
+starts a model completion or a worker. From P910, query it inside the gateway
+container without printing the token:
+
+    docker exec peterbot python -c 'import json,os,urllib.request; r=urllib.request.Request("http://127.0.0.1:8770/diagnostics",headers={"Authorization":"Bearer "+os.environ["PETERBOT_RUNNER_TOKEN"]}); print(json.load(urllib.request.urlopen(r,timeout=8)))'
+
+`/health` stays a cheap process/Discord check. A green `/health` is not proof
+that the model, VM runner, or queue consumer is ready; use `/diagnostics` for
+that distinction.
+
 ### Retention
 
 Nothing is deleted unless `--apply` is given, and `--apply` refuses to run

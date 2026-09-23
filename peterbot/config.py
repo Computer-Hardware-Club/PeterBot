@@ -334,6 +334,51 @@ class AgentConfig:
     vision_enabled: bool = True
 
 
+
+CONVERSATION_TIERS = ("casual", "normal", "deep")
+CONVERSATION_TIER_KEYS = ("thinking", "reasoning_effort", "budget_tokens", "thinking_budget",
+                          "rescue_budget_tokens", "temperature")
+
+
+@dataclass(frozen=True)
+class ConversationConfig:
+    """Optional per-tier generation envelopes for the conversational turn.
+
+    Absent from config.json entirely means built-in profiles; the gateway never has
+    to know about this block. Values are validated shape only — conversation.py
+    clamps them to safe bounds at use time.
+    """
+    tiers: Dict[str, Any] = field(default_factory=dict)
+
+
+def _conversation_tiers(section: Mapping[str, Any]) -> Dict[str, Any]:
+    tiers = section.get("tiers", {})
+    if not isinstance(tiers, dict):
+        raise ValueError("conversation.tiers must be an object")
+    normalized: Dict[str, Any] = {}
+    for tier, profile in tiers.items():
+        if tier not in CONVERSATION_TIERS:
+            raise ValueError(f"conversation.tiers has unknown tier: {tier}")
+        if not isinstance(profile, dict):
+            raise ValueError(f"conversation.tiers.{tier} must be an object")
+        unknown = set(profile) - set(CONVERSATION_TIER_KEYS)
+        if unknown:
+            raise ValueError(f"conversation.tiers.{tier} has unknown keys: {', '.join(sorted(unknown))}")
+        if "thinking" in profile and not isinstance(profile["thinking"], bool):
+            raise ValueError(f"conversation.tiers.{tier}.thinking must be a boolean")
+        if profile.get("reasoning_effort") not in (None, "low", "medium"):
+            raise ValueError(f"conversation.tiers.{tier}.reasoning_effort must be low or medium")
+        for key in ("budget_tokens", "thinking_budget", "rescue_budget_tokens"):
+            if key in profile and (not isinstance(profile[key], int) or isinstance(profile[key], bool)
+                                   or profile[key] <= 0):
+                raise ValueError(f"conversation.tiers.{tier}.{key} must be a positive integer")
+        if "temperature" in profile:
+            value = profile["temperature"]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 2:
+                raise ValueError(f"conversation.tiers.{tier}.temperature must be between 0 and 2")
+        normalized[tier] = dict(profile)
+    return normalized
+
 @dataclass(frozen=True)
 class AppConfig:
     discord_token: Optional[str]
@@ -347,6 +392,7 @@ class AppConfig:
     behavior: BehaviorConfig
     config_path: str
     agent: AgentConfig = field(default_factory=AgentConfig)
+    conversation: ConversationConfig = field(default_factory=ConversationConfig)
 
     @classmethod
     def load(cls, config_file: Optional[str] = None) -> "AppConfig":
@@ -363,6 +409,9 @@ class AppConfig:
         logging_section = _expect_section(raw, "logging")
         behavior_section = _expect_section(raw, "behavior")
         agent_section = _expect_section(raw, "agent")
+        conversation_section = raw.get("conversation") or {}
+        if not isinstance(conversation_section, dict):
+            raise ValueError("conversation must be an object")
         guild_ids = agent_section.get("allowed_guild_ids", [])
         if not isinstance(guild_ids, list) or any(
             not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in guild_ids
@@ -522,6 +571,7 @@ class AppConfig:
                 allow_dms=_bool_or_default(agent_section, "allow_dms", False),
                 vision_enabled=_bool_or_default(agent_section, "vision_enabled", True),
             ),
+            conversation=ConversationConfig(tiers=_conversation_tiers(conversation_section)),
         )
         config.validate()
         return config

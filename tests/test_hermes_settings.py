@@ -31,6 +31,8 @@ def test_valid_settings_defaults_and_normalization(load):
     assert settings.runner_url == "http://runner:8090"
     assert settings.tool_service_url == "http://gateway:8091"
     assert settings.officer_only is True
+    assert settings.member_work_enabled is False
+    assert settings.announcement_destination_ids == frozenset()
     assert settings.max_tokens == 8192
     assert settings.listen_channel_ids == frozenset()
     assert settings.control_channel_ids == frozenset()
@@ -48,9 +50,13 @@ def test_listening_requires_explicit_valid_channel_ids(load):
         with pytest.raises(ValueError, match="conversation_lease_seconds"):
             load({"conversation_lease_seconds": duration})
     assert load({"control_channel_ids": [21]}).control_channel_ids == frozenset({21})
+    assert load({"announcement_destination_ids": [30]}).announcement_destination_ids == frozenset({30})
     for channels in (None, "all", [True], [0], ["21"]):
         with pytest.raises(ValueError, match="control_channel_ids"):
             load({"control_channel_ids": channels})
+    for channels in (None, "all", [True], [0], ["30"]):
+        with pytest.raises(ValueError, match="announcement_destination_ids"):
+            load({"announcement_destination_ids": channels})
 
 
 @pytest.mark.parametrize("key", ["allowed_guild_ids", "officer_role_ids", "owner_user_ids"])
@@ -100,6 +106,13 @@ def test_state_dir_requires_absolute_nonempty_path(load, value):
 def test_pilot_switch_requires_boolean(load, value):
     with pytest.raises(ValueError):
         load({"officer_only": value})
+
+
+@pytest.mark.parametrize("value", ["true", 0, 1, None])
+def test_member_work_rollout_requires_explicit_boolean(load, value):
+    with pytest.raises(ValueError, match="member_work_enabled"):
+        load({"officer_only": False, "member_work_enabled": value})
+    assert load({"officer_only": False, "member_work_enabled": True}).member_work_enabled
 
 
 @pytest.mark.parametrize("key,lower,upper", [

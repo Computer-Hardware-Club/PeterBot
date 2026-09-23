@@ -8,7 +8,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import discord
 import pytest
@@ -187,6 +187,37 @@ def test_progress_reports_elapsed_time_only():
     assert not any('%' in edit for edit in edits)
 
 
+def test_worker_stage_updates_one_message_without_exposing_raw_text():
+    async def scenario():
+        channel = FakeChannel()
+        clock = [100.0]
+        stage = ['researching']
+        presence = Presence(channel, status_after=0, max_chars=200, now=lambda: clock[0])
+        async with presence:
+            await asyncio.sleep(0.01)
+            def stage_getter():
+                clock[0] += 10  # each real progress tick exceeds the edit throttle
+                current = stage[0]
+                stage[0] = 'running_code'
+                return current
+            task = asyncio.create_task(watch_task(
+                presence, 'job', interval=0.01, status_getter=stage_getter))
+            async def wait_for_two_edits():
+                while not channel.messages or len(next(iter(channel.messages.values())).edits) < 2:
+                    await asyncio.sleep(0.001)
+            await asyncio.wait_for(wait_for_two_edits(), 1)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return channel
+
+    channel = run(scenario())
+    assert len(channel.sent) == 1
+    edits = next(iter(channel.messages.values())).edits
+    assert any(edit.startswith('researching —') for edit in edits)
+    assert any(edit.startswith('running code —') for edit in edits)
+    assert all('%' not in edit and 'rm -rf' not in edit for edit in edits)
+
+
 def test_elapsed_label_is_readable():
     assert elapsed_label(9) == '9s'
     assert elapsed_label(59.9) == '59s'
@@ -323,7 +354,48 @@ def test_progress_reporter_edits_the_message_the_member_is_watching(tmp_path):
 
     status, channel = run(scenario())
     assert len(channel.sent) == 1                 # never posts a second message
-    assert status.edits and status.edits[0].startswith('still working — ')
+    assert status.edits and status.edits[0].startswith('working through the request — ')
+
+
+def test_long_fast_answer_retries_only_the_unsent_tail(tmp_path):
+    async def scenario():
+        channel = FakeChannel()
+        channel.id = 20
+        @asynccontextmanager
+        async def typing():
+            yield
+        channel.typing = typing
+        answer = 'Detailed explanation. ' * 220
+        message = SimpleNamespace(id=300, guild=SimpleNamespace(id=10),
+            channel=channel, author=SimpleNamespace(id=1), attachments=[],
+            created_at=None)
+        async with gateway_with_channel(tmp_path, channel) as gateway:
+            gateway.bot.user = SimpleNamespace(id=999)
+            gateway.conversational_reply = AsyncMock(return_value=answer)
+            original_send = channel.send
+            attempts = [0]
+            async def flaky_send(*args, **kwargs):
+                attempts[0] += 1
+                if attempts[0] == 2:
+                    raise http_error(429)
+                return await original_send(*args, **kwargs)
+            channel.send = flaky_send
+            with patch('peterbot.context.get_recent_channel_entries', new=AsyncMock(return_value=[])):
+                await gateway.respond_to_message(message, 'explain in detail')
+            rows = gateway.jobs.undelivered()
+            assert len(rows) == 1
+            assert rows[0]['delivery_cursor'] == 1
+            assert len(channel.sent) == 1
+            channel.send = original_send
+            await gateway.deliver(rows[0])
+            final = gateway.jobs.get(rows[0]['id'])
+            assert final['delivery_status'] == 'delivered'
+            assert len(channel.sent) == 3  # first chunk never replayed
+            assert len(gateway.conversations.context(guild_id=10, user_id=1,
+                       channel_id=channel.id,
+                       audience='public')) > 0
+
+    run(scenario())
 
 
 def test_progress_reporter_gives_up_quietly_on_a_missing_message(tmp_path):

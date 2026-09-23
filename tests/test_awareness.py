@@ -60,6 +60,41 @@ def test_discussion_code_urls_webhooks_and_system_messages_are_ignored():
     asyncio.run(scenario())
 
 
+def thread_message(content, *, author_id=1, message_id=10, kind="private",
+                   owner_id=999):
+    guild = SimpleNamespace(id=10, name="Club")
+    channel = SimpleNamespace(id=30, guild=guild,
+                              is_private=lambda: kind == "private",
+                              owner_id=owner_id)
+    return SimpleNamespace(id=message_id, content=content, guild=guild, channel=channel,
+                           author=SimpleNamespace(id=author_id, bot=False, display_name="Student"),
+                           mentions=[], reference=None, webhook_id=None,
+                           type=discord.MessageType.default, attachments=[])
+
+
+def test_private_task_thread_followup_reaches_only_its_own_session():
+    """A natural message in the owner's private task thread is addressed even
+    with no name, no reply, and an expired lease — thread membership is the
+    binding. Public channels and non-task threads stay unaddressed."""
+    async def scenario():
+        current = [0]
+        detector = AwarenessRouter(guild_ids=frozenset({10}),
+                                   channel_ids=frozenset({20, 30}),
+                                   bot_user_id=999, clock=lambda: current[0])
+        # No lease exists at all: membership alone addresses the owner's thread.
+        assert await detector.addressed(thread_message("also add a test")) == "thread"
+        detector.remember(thread_message("also add a test", message_id=11), "thread")
+        # A thread the bot did not create is not a task session context.
+        assert await detector.addressed(
+            thread_message("help", message_id=12, owner_id=555)) is None
+        # A public thread under an allowed channel is ordinary chat, not a session.
+        assert await detector.addressed(
+            thread_message("help", message_id=13, kind="public")) is None
+        # Channel 20 is allowed but ordinary: no lease, no name -> silence.
+        assert await detector.addressed(message("also add a test", message_id=14)) is None
+    asyncio.run(scenario())
+
+
 def test_name_and_followup_enter_existing_conversation_handler(setup_handlers):
     bot, runtime = setup_handlers
     runtime.hermes = SimpleNamespace(
