@@ -16,9 +16,13 @@ from peterbot.config import (
 )
 from peterbot.context import build_recap_history
 from peterbot.knowledge import (
+    chunk_is_expired,
+    chunk_is_superseded,
+    heading_slug,
     load_knowledge_index,
     load_channel_profiles,
     load_knowledge_chunks,
+    parse_markdown_knowledge,
     rank_knowledge_chunks,
     resolve_channel_profile,
 )
@@ -139,3 +143,26 @@ def test_recap_prompt_artifacts_skip_channel_profile_and_knowledge(tmp_path) -> 
     assert knowledge_chunks == []
     assert "Relevant club knowledge:" not in system_prompt
     assert "Channel profile:" not in system_prompt
+
+
+def test_expired_static_chunk_is_dropped_only_after_its_date() -> None:
+    chunks = parse_markdown_knowledge(
+        "## Room\nRoom 214.\nexpires: 2026-05-01\n\n## Funding\n$500 a semester.\n")
+    room, funding = chunks
+    assert chunk_is_expired(room, datetime(2026, 9, 22).date())
+    assert not chunk_is_expired(room, datetime(2026, 1, 1).date())
+    assert not chunk_is_expired(funding, datetime(2026, 9, 22).date())
+
+
+def test_live_fact_headings_supersede_matching_static_chunks() -> None:
+    chunks = parse_markdown_knowledge(
+        "## Officers\nOld Bob is president.\n\n## Meeting day\nTuesdays.\n\n## Room\n214.\n")
+    officers, meeting_day, room = chunks
+    assert heading_slug(officers.heading) == "officers"
+    # A committed fact keyed "meeting_day" replaces the static "Meeting day" text.
+    assert chunk_is_superseded(meeting_day, {"meeting_day"})
+    assert not chunk_is_superseded(room, {"meeting_day"})
+    # Aliases let the roster fact supersede the plural "Officers" heading.
+    aliases = {"officer_roster": frozenset({"officers"})}
+    assert chunk_is_superseded(officers, {"officer_roster"}, aliases)
+    assert not chunk_is_superseded(officers, {"officer_roster"})

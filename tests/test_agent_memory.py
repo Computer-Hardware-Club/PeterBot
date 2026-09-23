@@ -148,3 +148,18 @@ def test_empty_allowlist_blocks_all_memory_access(tmp_path):
         create(store)
     with pytest.raises(PolicyDenied):
         store.search(MEMBER, scope="personal")
+
+
+def test_notes_path_is_not_the_idempotent_control_plane(store):
+    # Memory is the loose-notes store: one source message MAY produce several
+    # notes (a worker summarising one message into many facts), and there is
+    # deliberately no source-message dedup here. Idempotent, version-bound
+    # replay lives in ClubStateStore; the gateway must route authoritative
+    # fact/roster writes there, never through create().
+    first = store.create(OFFICER, scope="club", content="meeting moved",
+                         source_message_id=500)
+    second = store.create(OFFICER, scope="club", content="room changed",
+                          source_message_id=500)
+    assert first["id"] != second["id"]
+    assert {r["id"] for r in store.search(OFFICER, scope="club")} == \
+        {first["id"], second["id"]}
