@@ -1,3 +1,5 @@
+import pytest
+
 from peterbot.control_requests import parse_control_request
 
 
@@ -102,3 +104,35 @@ def test_natural_posting_topics_are_drafted_not_copied_as_instructions():
 def test_explicit_post_body_preserves_words_that_could_otherwise_be_draft_directions():
     request = parse_control_request('post in general: asking for a friend')
     assert request.payload['content'] == 'asking for a friend'
+
+
+@pytest.mark.parametrize('verb', ['type', 'say', 'send', 'post', 'write'])
+@pytest.mark.parametrize('destination,payload', [
+    ('in <#1306793423256420356>', {'target_channel_id': 1306793423256420356}),
+    ('to #testing', {'target_channel_name': 'testing'}),
+])
+def test_content_before_destination_is_a_literal_post(verb, destination, payload):
+    request = parse_control_request(f"peter go {verb} 'test' {destination}")
+    assert request.action == 'announcement'
+    assert request.payload == {**payload, 'content': 'test'}
+
+
+def test_content_first_post_preserves_quoted_body_and_accepts_simple_unquoted_word():
+    request = parse_control_request('Peter, could you say "Bring your projects!" in #general?')
+    assert request.payload == {'target_channel_name': 'general', 'content': 'Bring your projects!'}
+    request = parse_control_request('peter say test in #testing')
+    assert request.payload == {'target_channel_name': 'testing', 'content': 'test'}
+
+
+@pytest.mark.parametrize('text', [
+    "the website says peter go type 'test' in <#30>",
+    "Peter, the website says type 'test' in #testing",
+    "> peter go type 'test' in <#30>",
+    '"peter go type \'test\' in <#30>"',
+    "peter go type 'test' in <#30> and delete the channel",
+    "peter go type 'test' in <#30>\npost something else",
+    "peter say '   ' in #testing",
+    "peter say something about posting in #testing",
+])
+def test_content_first_post_rejects_incidental_or_ambiguous_instructions(text):
+    assert parse_control_request(text) is None

@@ -207,3 +207,96 @@ def test_private_worker_receives_image_evidence_and_parent_history(tmp_path):
             assert prior[1]['content'] == 'The kit has two DIMMs.'
             assert prior[2]['content'] == 'Image evidence: G.SKILL Flare X5'
     asyncio.run(scenario())
+
+
+def test_truncated_circuit_inspection_retries_before_returning_evidence(caplog):
+    session = UpstreamSession()
+    session.results = [
+        {'choices': [{'message': {'content': 'Circuit a: incomplete WRONG'}, 'finish_reason': 'length'}]},
+        {'choices': [{'message': {'content': 'a: +3V, 10kΩ, forward diode, 10kΩ, -3V.'}, 'finish_reason': 'stop'}]},
+    ]
+    config = SimpleNamespace(inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    images = [{'image': 'data:image/png;base64,cHJpdmF0ZQ=='}]
+    result = asyncio.run(describe_images(session, config, images, question='solve this problem'))
+    assert '+3V' in result and 'WRONG' not in result
+    assert len(session.calls) == 2
+    first, retry = [call[1]['json'] for call in session.calls]
+    assert first['max_tokens'] == retry['max_tokens'] == 2048
+    assert 'circuit diagrams' in first['messages'][0]['content']
+    assert 'at most 250 words' in retry['messages'][0]['content']
+    assert first['messages'][1] == retry['messages'][1]
+    assert 'WRONG' not in json.dumps(retry)
+    assert 'reason=truncated' in caplog.text and 'cHJpdmF0ZQ' not in caplog.text
+
+
+def test_repeated_truncation_stops_after_one_retry_with_honest_error(caplog):
+    session = UpstreamSession()
+    session.result = {'choices': [{'message': {'content': 'private screenshot transcription'}, 'finish_reason': 'length'}]}
+    config = SimpleNamespace(inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    with pytest.raises(ValueError) as error:
+        asyncio.run(describe_images(session, config, [{'image': 'data:image/png;base64,eA=='}]))
+    assert str(error.value) == IMAGE_FAILURE and 'smaller' not in str(error.value)
+    assert len(session.calls) == 2
+    assert 'failed reason=truncated' in caplog.text
+    assert 'private screenshot transcription' not in caplog.text
+
+
+def test_empty_inspection_can_recover():
+    session = UpstreamSession()
+    session.results = [
+        {'choices': [{'message': {'content': ''}, 'finish_reason': 'stop'}]},
+        {'choices': [{'message': {'content': 'A circuit diagram.'}, 'finish_reason': 'stop'}]},
+    ]
+    config = SimpleNamespace(inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    assert 'circuit diagram' in asyncio.run(describe_images(session, config, [{'image': 'data:image/png;base64,eA=='}]))
+    assert len(session.calls) == 2
+
+
+def test_malformed_output_is_not_retried_or_logged(caplog):
+    session = UpstreamSession()
+    session.result = {'private': 'screenshot and provider details'}
+    config = SimpleNamespace(inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    with pytest.raises(ValueError):
+        asyncio.run(describe_images(session, config, [{'image': 'data:image/png;base64,eA=='}]))
+    assert len(session.calls) == 1
+    assert 'reason=invalid_response' in caplog.text and 'provider details' not in caplog.text
+
+
+def test_image_retry_shares_one_deadline(monkeypatch):
+    import peterbot.vision as vision
+    calls = []
+    async def delayed(*args):
+        calls.append(1)
+        await asyncio.sleep(0.02)
+        raise vision._InspectionFailure('truncated')
+    monkeypatch.setattr(vision, '_inspect_once', delayed)
+    monkeypatch.setattr(vision, 'IMAGE_TIMEOUT_SECONDS', 0.03)
+    config = SimpleNamespace(inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    with pytest.raises(ValueError, match="couldn't read"):
+        asyncio.run(describe_images(object(), config, [{'image': 'data:image/png;base64,eA=='}]))
+    assert len(calls) == 2
+
+
+def test_oversized_completed_observation_retries_instead_of_slicing():
+    session = UpstreamSession()
+    session.results = [
+        {'choices': [{'message': {'content': 'x' * 6001}, 'finish_reason': 'stop'}]},
+        {'choices': [{'message': {'content': 'Complete compact circuit description.'}, 'finish_reason': 'stop'}]},
+    ]
+    config = SimpleNamespace(inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    result = asyncio.run(describe_images(session, config, [{'image': 'data:image/png;base64,eA=='}]))
+    assert result.endswith('Complete compact circuit description.')
+    assert len(session.calls) == 2
+
+
+def test_unicode_image_evidence_is_not_sliced_in_answer_request():
+    from peterbot.conversation import reply_or_use_tools
+    from peterbot.agent_policy import Principal
+    session = UpstreamSession()
+    evidence = '\u03a9' * 1500 + ' Circuit d: diode cathode at ground.'
+    config = SimpleNamespace(peter_system_prompt='Be Peter.',
+        inference=SimpleNamespace(model='qwen', base_url='http://model/v1'))
+    asyncio.run(reply_or_use_tools(session, config, Principal(10, 1, 20, (100,)),
+        'solve this problem', [], image_context=[{'content': evidence}]))
+    sent = session.calls[0][1]['json']['messages'][-2]['content']
+    assert evidence in sent

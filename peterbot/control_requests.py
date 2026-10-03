@@ -40,6 +40,22 @@ _ANNOUNCE = re.compile(
     r"(?P<target><#\d{1,20}>|#?[\w-]{1,100})(?:\s+channel)?"
     r"(?P<separator>\s*[:,-]\s*|\s+)?(?P<content>.*)", re.IGNORECASE,
 )
+_LITERAL_POST_START = (
+    r"(?:(?:please|can you|could you|would you)\s+)?(?:go\s+)?"
+    r"(?:type|say|send|post|write)\s+"
+)
+_LITERAL_POST_END = (
+    r"\s+(?:in|to)\s+(?:the\s+)?(?P<target><#\d{1,20}>|#[\w-]{1,100})"
+    r"(?:\s+channel)?[.!?]?"
+)
+_QUOTED_POST = re.compile(
+    _LITERAL_POST_START + r'''(?P<quote>['"])(?P<content>.+?)(?P=quote)'''
+    + _LITERAL_POST_END, re.IGNORECASE,
+)
+_SIMPLE_POST = re.compile(
+    _LITERAL_POST_START + r"(?P<content>[\w][\w.!?,:-]{0,199})"
+    + _LITERAL_POST_END, re.IGNORECASE,
+)
 _IDENTITY_KEY = re.compile(
     r"^(?:model|model_name|running_model|peter_model|llm|ai_model|runtime_model|under_the_hood)$",
     re.IGNORECASE)
@@ -97,6 +113,16 @@ def parse_control_request(message_text: str, *, bot_user_id: int | None = None) 
         else:
             payload['content'] = re.sub(r'^(?:saying|that says)\s+', '', content, flags=re.IGNORECASE)
         return ControlRequest('announcement', payload)
+    # Content-first requests require an explicit channel reference and a whole
+    # request match. Unquoted bodies stay single-word to avoid guessing where
+    # conversational prose ends and a publication instruction begins.
+    if match := (_QUOTED_POST.fullmatch(text) or _SIMPLE_POST.fullmatch(text)):
+        target, content = match['target'], match['content'].strip()
+        if not content:
+            return None
+        payload = ({'target_channel_id': int(target[2:-1])} if target.startswith('<#')
+                   else {'target_channel_name': target.lstrip('#')})
+        return ControlRequest('announcement', {**payload, 'content': content})
     if match := _UNDO.fullmatch(text):
         action = {'fact': 'club_fact', 'club fact': 'club_fact',
                   'roster': 'roster', 'style': 'style'}[match['kind'].lower()]

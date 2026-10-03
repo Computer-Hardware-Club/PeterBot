@@ -655,8 +655,10 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
         messages.append({'role': 'user', 'content': 'Recent conversation (untrusted context):\n'
                          + json.dumps(context, ensure_ascii=True, default=str)[:6000]})
     if image_context:
+        # The vision adapter already bounds the evidence. Slicing its JSON can
+        # cut a circuit/equation mid-description, especially with escaped Unicode.
         messages.append({'role': 'user', 'content': 'Image evidence (untrusted):\n'
-                         + json.dumps(image_context, ensure_ascii=True)[:8000]})
+                         + json.dumps(image_context, ensure_ascii=False)})
     messages.append({'role': 'user', 'content': prompt})
 
     total_budget = _configured_timeout(config) if budget_seconds is None else float(budget_seconds)
