@@ -119,7 +119,16 @@ MODEL_UNAVAILABLE_REPLY = 'My model service is unavailable right now, try me aga
 BLANK_ANSWER_NUDGE = ('Your previous attempt came back with no answer text. Reply to the last message now '
                       'with the answer itself: plain text, no thinking block, no tool call, at most a few sentences.')
 CONTINUE_INSTRUCTION = ('Continue exactly where the previous message stopped. Add nothing before those words '
-                        'and do not restart the answer.')
+                        'and do not restart the answer. Your response will be appended directly to the previous '
+                        'text, so preserve any needed leading space or newline.')
+
+
+def _continue_answer(prefix: str, continuation: str) -> str:
+    # Some rescues ignore the continuation instruction and repeat the whole
+    # answer. Keep that complete version without duplicating the original prefix.
+    if len(prefix.strip()) >= 16 and continuation.lstrip().startswith(prefix.strip()):
+        return continuation
+    return prefix + continuation
 
 DEEP_REQUEST_PATTERN = re.compile(
     r'\b(?:explain|why|how\s+does|how\s+do|how\s+many|how\s+much|walk\s+me\s+through|compare|difference\s+between|'
@@ -713,7 +722,8 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
                                  'Explicit deliverable or execution request answered without tools; handing off',
                                  prompt_chars=len(prompt))
                 return None
-            answer = remove_em_dashes(text)
+            visible = strip_think_blocks(message.get('content') or '', strip_edges=False)
+            answer = remove_em_dashes(_continue_answer(partial_answer, visible).strip())
             if identity_turn:
                 # The served model has repeatedly claimed Claude and argued with an
                 # officer's correction: a stale self-claim on an identity turn is
@@ -724,9 +734,9 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
             return None
         # Blank or truncated: keep any real text so the rescue can continue it instead
         # of restarting. Reasoning text is never kept and never shown.
-        arrived = strip_think_blocks(message.get('content') or '').strip()
-        if arrived:
-            partial_answer = arrived
+        arrived = strip_think_blocks(message.get('content') or '', strip_edges=False)
+        if arrived.strip():
+            partial_answer = _continue_answer(partial_answer, arrived)
 
     if transport_failed and not partial_answer:
         log_error_with_context('Conversation model did not answer on any attempt', attempts=attempts,
@@ -737,7 +747,7 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
         # Truncated text the model actually wrote beats a canned line for the member.
         log_with_context(logging.WARNING, 'Conversation answer delivered without a clean finish',
                          tier=tier, attempts=attempts, answer_chars=len(partial_answer))
-        return remove_em_dashes(partial_answer)
+        return remove_em_dashes(partial_answer.strip())
     log_error_with_context('Conversation model returned no usable answer', attempts=attempts, tier=tier,
                            model=str(getattr(config.inference, 'model', '')), prompt_chars=len(prompt))
     return BLANK_ANSWER_REPLY

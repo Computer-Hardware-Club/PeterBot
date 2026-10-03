@@ -367,3 +367,35 @@ def test_invented_fast_model_tool_decision_never_hands_off(tmp_path, name, argum
             assert isinstance(reply, str) and reply
             assert gateway.jobs.pending() == []
     asyncio.run(scenario())
+
+
+def test_rescued_proof_delivers_and_saves_every_chunk_in_order(tmp_path):
+    from peterbot.context import split_for_discord
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            prefix = ('Let a_j be a nonzero coefficient in the dependence relation.\n\n'
+                      + 'Substitute the expression for v_j into each linear combination. ' * 32
+                      + '\nThus x belongs to span{v')
+            tail = '₁, …, v̂ⱼ, …, vₙ}. The reverse inclusion is immediate, so the spans are equal.'
+            gateway.session.results = [
+                {'choices': [{'message': {'content': prefix}, 'finish_reason': 'length'}]},
+                {'choices': [{'message': {'content': tail}, 'finish_reason': 'stop'}]},
+            ]
+            answer = await gateway.conversational_reply(Principal(10, 1, 20, (100,)),
+                                                       'prove these spans are equal', [])
+            assert answer == prefix + tail
+            job = gateway.jobs.record_fast_answer(guild_id=10, user_id=1, channel_id=20,
+                source_message_id=30, prompt='prove these spans are equal', answer=answer,
+                status_message_id=777)
+            status = SimpleNamespace(id=777, edit=AsyncMock())
+            channel.fetch_message = AsyncMock(return_value=status)
+            channel.send.side_effect = [SimpleNamespace(id=778 + i) for i in range(10)]
+            await gateway.deliver(job)
+            delivered = [status.edit.await_args.kwargs['content']] + [call.args[0] for call in channel.send.await_args_list]
+            assert delivered == split_for_discord(prefix + tail)
+            assert delivered[0].startswith('Let a_j')
+            assert delivered[-1].endswith('the spans are equal.')
+            saved = gateway.jobs.get(job['id'])
+            assert saved['answer'] == prefix + tail
+            assert saved['delivery_cursor'] == len(delivered)
+    asyncio.run(scenario())

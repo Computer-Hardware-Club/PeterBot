@@ -168,7 +168,7 @@ def build_chat_messages(
     return messages
 
 
-def strip_think_blocks(text: str) -> str:
+def strip_think_blocks(text: str, *, strip_edges: bool = True) -> str:
     if not text:
         return text
     cleaned = re.sub(
@@ -177,7 +177,8 @@ def strip_think_blocks(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    return cleaned.replace("/no_think", "").strip()
+    cleaned = cleaned.replace("/no_think", "")
+    return cleaned.strip() if strip_edges else cleaned
 
 
 def collapse_repeated_punctuation(text: str) -> str:
