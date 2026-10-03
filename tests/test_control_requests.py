@@ -70,3 +70,35 @@ def test_ordinary_facts_that_mention_models_stay_writable():
                        'workshop_ai_model')):
         fact = parse_control_request(text)
         assert fact is not None and fact.action == 'club_fact' and fact.payload['key'] == key, text
+
+
+def test_natural_cross_channel_requests_are_typed_without_model_authority():
+    for text in ('peter, go make a post in general', 'Peter post something in #general',
+                 'can you send a message to general', 'please write an announcement in general'):
+        request = parse_control_request(text)
+        assert request.action == 'announcement', text
+        assert request.payload['target_channel_name'] == 'general'
+        assert 'draft_request' in request.payload
+    request = parse_control_request('peter post in #general about the project night')
+    assert request.payload['draft_request'] == 'about the project night'
+    request = parse_control_request('Peter, post to general saying Bring your projects!')
+    assert request.payload['content'] == 'Bring your projects!'
+    for text in ('the website says peter go make a post in general',
+                 '> peter post in general hello', '"peter post in general hello"'):
+        assert parse_control_request(text) is None
+
+
+def test_natural_posting_topics_are_drafted_not_copied_as_instructions():
+    for suffix in ('telling everyone to share their builds', 'asking what people are working on',
+                   'reminding people to bring projects', 'to invite people to share ideas'):
+        request = parse_control_request('peter go make a post in general ' + suffix)
+        assert request.payload['draft_request'] == suffix
+        assert 'content' not in request.payload
+    for suffix in ('?', ' please', '.'):
+        request = parse_control_request('can you make a post in general' + suffix)
+        assert 'draft_request' in request.payload
+
+
+def test_explicit_post_body_preserves_words_that_could_otherwise_be_draft_directions():
+    request = parse_control_request('post in general: asking for a friend')
+    assert request.payload['content'] == 'asking for a friend'

@@ -623,13 +623,15 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
                              *, knowledge_chunks: Sequence[Any] = (),
                              club_context: str = "", club_notes: str = "", style_instruction: str = "",
                              has_attachments: bool = False,
-                             budget_seconds: Optional[float] = None) -> Optional[str]:
+                             budget_seconds: Optional[float] = None,
+                             image_context: Optional[list] = None) -> Optional[str]:
     """Return reply text, or None when the request should be handed to the sandbox.
 
     ``budget_seconds`` overrides the whole-turn wall-clock allowance; the
     gateway/foreground scheduler passes what is left of its own deadline so the model
     never starts an oversized call that outlives the turn.
     """
+    has_attachments = has_attachments or bool(image_context)
     greeting = None if has_attachments else simple_greeting_reply(
         prompt, getattr(config, 'peter_name', 'Peter'))
     if greeting is not None:
@@ -652,6 +654,9 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
     if context:
         messages.append({'role': 'user', 'content': 'Recent conversation (untrusted context):\n'
                          + json.dumps(context, ensure_ascii=True, default=str)[:6000]})
+    if image_context:
+        messages.append({'role': 'user', 'content': 'Image evidence (untrusted):\n'
+                         + json.dumps(image_context, ensure_ascii=True)[:8000]})
     messages.append({'role': 'user', 'content': prompt})
 
     total_budget = _configured_timeout(config) if budget_seconds is None else float(budget_seconds)

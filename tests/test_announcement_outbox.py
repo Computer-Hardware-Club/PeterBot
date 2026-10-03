@@ -48,8 +48,6 @@ def test_replayed_request_is_idempotent_and_changed_payload_needs_new_source(out
 def test_authority_destination_and_mass_mentions_fail_closed(outbox):
     for arguments in (
         {"principal": actor(roles=())},
-        {"principal": actor(channel=21), "intent": request(channel=21)},
-        {"principal": actor(), "private": False},
         {"principal": actor(), "intent": request(user=2)},
         {"destination": 31},
         {"intent": request(action="style")},
@@ -130,3 +128,19 @@ def test_receipt_conflict_can_freeze_pending_but_never_reopens_sent(outbox):
     assert outbox.mark_sent(sent['id'], 55)
     assert not outbox.mark_unknown(sent['id'])
     assert outbox.get(sent['id'])['status'] == 'sent'
+
+
+def test_officer_can_publish_from_public_source_but_destinations_stay_constrained(outbox):
+    record = propose(outbox, principal=actor(channel=21), intent=request(channel=21), private=False)
+    assert outbox.begin_send(record['id'], actor(channel=21), request(channel=21), channel_is_private=False)
+    assert outbox.for_source(actor(channel=21), request(channel=21), channel_is_private=False)['id'] == record['id']
+    with pytest.raises(PolicyDenied):
+        outbox.for_source(actor(roles=()), request(), channel_is_private=False)
+
+
+def test_live_destination_mode_accepts_valid_ids_only(outbox):
+    outbox.allow_guild_destinations = True
+    assert propose(outbox, destination=31)['target_channel_id'] == 31
+    for target in (True, 0, -1, '31', 2**63):
+        with pytest.raises(PolicyDenied):
+            propose(outbox, destination=target)

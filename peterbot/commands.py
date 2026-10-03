@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -281,6 +282,12 @@ def register_handlers(bot: commands.Bot, runtime: PeterBotRuntime) -> None:
         direct_mention = bool(bot.user and bot.user in (getattr(message, "mentions", None) or []))
         address_reason = "mention" if direct_mention else (await router.addressed(message) if router else None)
         if control_proposal is not None and message.channel.id in hermes.settings.control_channel_ids:
+            address_reason = address_reason or "control"
+        elif (control_proposal is not None and control_proposal.action == 'announcement'
+              and message.guild.id in hermes.settings.allowed_guild_ids
+              and re.match(r'^peter[,:]?\s+', message.content.strip(), re.IGNORECASE)):
+            # Explicit publication requests work beyond the passive-listening channels.
+            # This is addressing only; the gateway verifies current officer authority.
             address_reason = address_reason or "control"
         if address_reason:
             content = build_current_mention_prompt_text(message, bot_user_id=bot.user.id)

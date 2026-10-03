@@ -13,7 +13,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 
-from .agent_policy import AgentPolicy, ControlIntent, PolicyDenied, Principal
+from .agent_policy import AgentPolicy, ControlIntent, PolicyDenied, Principal, _valid_id
 
 
 MENTION = re.compile(r"@(?:everyone|here)\b|<@!?\d+>|<@&\d+>", re.I)
@@ -30,7 +30,7 @@ class OutboxConflict(ValueError):
 
 class AnnouncementOutbox:
     def __init__(self, path: str | Path, policy: AgentPolicy,
-                 destinations: dict[int, frozenset[int]]):
+                 destinations: dict[int, frozenset[int]], *, allow_guild_destinations: bool = False):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db = sqlite3.connect(path)
@@ -57,13 +57,16 @@ class AnnouncementOutbox:
                             " WHERE status='sending'", (_now(),))
         self.policy = policy
         self.destinations = destinations
+        # Only the trusted Discord gateway enables live destination resolution.
+        self.allow_guild_destinations = allow_guild_destinations
 
     def _authorize(self, principal: Principal, intent: ControlIntent,
                    target_channel_id: int, private: bool) -> None:
         self.policy.require_control(principal, intent, channel_is_private=private)
         if intent.action != "announcement":
             raise PolicyDenied("This request does not authorize an announcement")
-        if type(target_channel_id) is not int or target_channel_id not in self.destinations.get(principal.guild_id, frozenset()):
+        if not _valid_id(target_channel_id) or (not self.allow_guild_destinations
+                and target_channel_id not in self.destinations.get(principal.guild_id, frozenset())):
             raise PolicyDenied("That announcement destination is not configured")
 
     @staticmethod
@@ -101,6 +104,16 @@ class AnnouncementOutbox:
 
     def get(self, action_id: str) -> dict | None:
         row = self.db.execute("SELECT * FROM announcements WHERE id=?", (action_id,)).fetchone()
+        return dict(row) if row else None
+
+    def for_source(self, principal: Principal, intent: ControlIntent, *, channel_is_private: bool) -> dict | None:
+        """Reuse the persisted draft on delivery replay instead of generating new text."""
+        self.policy.require_control(principal, intent, channel_is_private=channel_is_private)
+        row = self.db.execute(
+            "SELECT * FROM announcements WHERE guild_id=? AND source_message_id=?",
+            (principal.guild_id, intent.source_message_id)).fetchone()
+        if row and (row['actor_user_id'], row['source_channel_id']) != (principal.user_id, principal.channel_id):
+            raise PolicyDenied("This announcement belongs to a different verified request")
         return dict(row) if row else None
 
     def pending(self) -> list[dict]:

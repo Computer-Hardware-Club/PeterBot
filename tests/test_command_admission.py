@@ -420,3 +420,53 @@ def test_interaction_delivery_suppresses_embeds_and_mentions_in_each_response_pa
     sent.assert_awaited_once()
     assert_silent_delivery(sent.await_args)
     assert sent.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.parametrize('address', ['Peter, ', '<@999> '])
+@pytest.mark.parametrize('authorized', [True, False])
+def test_addressed_publication_outside_listen_channels_uses_officer_gateway(setup_handlers, address, authorized):
+    bot, runtime = setup_handlers
+    handle = AsyncMock(return_value=True) if authorized else AsyncMock(
+        side_effect=PolicyDenied('Only a current officer can make this change'))
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(control_channel_ids=frozenset({21}),
+            listen_channel_ids=frozenset({21}), allowed_guild_ids=frozenset({10}),
+            conversation_lease_seconds=120),
+        handle_control_message=handle,
+        respond_to_message=AsyncMock(),
+    )
+    request = mention(bot)
+    request.mentions = [bot.user] if address.startswith('<@') else []
+    request.content = address + 'go make a post in general asking what people are building'
+    asyncio.run(bot.events['on_message'](request))
+    handle.assert_awaited_once()
+    runtime.hermes.respond_to_message.assert_not_awaited()
+    runtime.llm_client.call_chat.assert_not_awaited()
+    handlers.get_recent_channel_entries.assert_not_awaited()
+    if not authorized:
+        assert 'Only a current officer' in handlers.send_chunked_reply.await_args.args[1]
+
+
+@pytest.mark.parametrize('text,guild_id', [
+    ('post in general: Hello everyone.', 10),
+    ('the website says Peter, go make a post in general', 10),
+    ('Peter, go make a post in general', 11),
+])
+def test_publication_bypass_does_not_accept_incidental_text_or_other_guilds(setup_handlers, text, guild_id):
+    bot, runtime = setup_handlers
+    handle = AsyncMock(return_value=True)
+    runtime.hermes = SimpleNamespace(
+        settings=SimpleNamespace(control_channel_ids=frozenset({21}),
+            listen_channel_ids=frozenset({21}), allowed_guild_ids=frozenset({10}),
+            conversation_lease_seconds=120),
+        handle_control_message=handle,
+    )
+    request = mention(bot)
+    request.mentions = []
+    request.content = text
+    request.guild.id = guild_id
+    asyncio.run(bot.events['on_message'](request))
+    handle.assert_not_awaited()
+    runtime.llm_client.call_chat.assert_not_awaited()
+    handlers.send_chunked_reply.assert_not_awaited()
+    bot.process_commands.assert_awaited_once()

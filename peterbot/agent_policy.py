@@ -111,5 +111,9 @@ class AgentPolicy:
             raise PolicyDenied("The control request does not match its verified Discord source")
         if not self.is_officer(principal):
             raise PolicyDenied("Only a current officer can make this change")
+        # Posting is explicitly officer-authorized from any accessible guild channel.
+        # Changes to shared state still require the private control channel.
+        if intent.action == "announcement":
+            return
         if intent.channel_id not in self.control_channel_ids or channel_is_private is not True:
             raise PolicyDenied("Use the configured private officer control channel")

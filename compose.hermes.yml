@@ -9,6 +9,8 @@ services:
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       LLAMA_CPP_API_KEY: ${LLAMA_CPP_API_KEY:-}
+      EXA_API_KEY: ${EXA_API_KEY:-}
+      PETERBOT_EXA_KEYLESS: ${PETERBOT_EXA_KEYLESS:-false}
       PETERBOT_CONFIG_FILE: /app/config.json
       PETERBOT_HERMES_CONFIG: /app/hermes.json
       PETERBOT_RUNNER_TOKEN: ${PETERBOT_RUNNER_TOKEN}

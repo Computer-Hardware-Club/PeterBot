@@ -113,6 +113,9 @@ class FakeSession:
             raise response
         return response
 
+    def post(self, url, **kwargs):
+        return self.get(url, **kwargs)
+
     async def close(self):
         self.closed = True
         if self.kwargs.get("connector"):
@@ -447,3 +450,124 @@ def test_fetch_ignores_accessibility_hidden_art_split_across_nodes(monkeypatch):
     fake_fetch(monkeypatch, [FakeResponse(html.encode())])
     result = execute("fetch_public_page", {"url": "https://computerhardwareclub.org/index.html"})
     assert result["text"] == "We're a student-run club."
+
+
+def test_exa_search_returns_citable_excerpts_and_scopes_credentials(monkeypatch):
+    session = FakeSession([FakeResponse(json.dumps({'results': [
+        {'title': '<b>Flare X5</b>', 'url': 'https://www.newegg.com/product',
+         'highlights': ['32GB DDR5 6000 CL36', '$99.99']},
+        {'title': 'blocked', 'url': 'http://127.0.0.1/', 'highlights': ['private']},
+    ]}).encode())])
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: session)
+    tool = ToolExecutor('', exa_api_key='test-provider-secret')
+    result = execute('web_search', {'query': 'Flare X5 price'}, tool)
+    assert result['provider'] == 'exa'
+    assert result['results'] == [{'title': 'Flare X5', 'url': 'https://www.newegg.com/product',
+                                  'snippet': '32GB DDR5 6000 CL36 $99.99'}]
+    url, kwargs = session.requests[0]
+    assert url == 'https://api.exa.ai/search'
+    assert kwargs['allow_redirects'] is False
+    assert kwargs['headers'] == {'x-api-key': 'test-provider-secret'}
+    assert kwargs['json']['contents']['highlights']['maxCharacters'] == 1200
+    assert 'test-provider-secret' not in json.dumps(result)
+
+
+def test_exa_failure_uses_searx_fallback_without_leaking_key(monkeypatch):
+    exa = FakeSession([FakeResponse(status=429)])
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: exa)
+    tool = ToolExecutor('http://localhost:8081', exa_api_key='provider-secret')
+    tool.http_session = FakeSession([FakeResponse(json.dumps({'results': [
+        {'title': 'Source', 'url': 'https://www.python.org/', 'content': 'source text'},
+    ]}).encode())])
+    result = execute('web_search', {'query': 'python'}, tool)
+    assert result['provider'] == 'searxng' and result['status'] == 'partial'
+    assert 'headers' not in tool.http_session.requests[0][1]
+    assert 'provider-secret' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('body', [b'{}', b'{', b'{"results": []}', b'{"results": [null]}', b'x' * (256 * 1024 + 1)])
+def test_exa_unusable_results_are_unavailable(monkeypatch, body):
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: FakeSession([FakeResponse(body)]))
+    assert execute('web_search', {'query': 'ram'}, ToolExecutor('', exa_api_key='x'))['status'] == 'unavailable'
+
+
+def test_blocked_retailer_uses_bounded_exa_contents(monkeypatch):
+    session = FakeSession([FakeResponse(json.dumps({'results': [
+        {'url': 'https://www.newegg.com/product', 'text': '<p>32GB RAM $99.99</p>'},
+    ]}).encode())])
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: session)
+    async def public(*args):
+        return []
+    monkeypatch.setattr(_PublicResolver, 'resolve', public)
+    tool = ToolExecutor('', exa_api_key='x')
+    async def blocked(url):
+        return json.dumps({'status': 'unavailable', 'message': 'blocked'})
+    monkeypatch.setattr(tool, '_fetch_page', blocked)
+    result = execute('fetch_public_page', {'url': 'https://www.newegg.com/product'}, tool)
+    assert result['provider'] == 'exa'
+    assert result['text'] == '32GB RAM $99.99'
+    assert result['status'] == 'partial'
+    assert session.requests[0][1]['json']['maxAgeHours'] == 0
+
+
+@pytest.mark.parametrize('url', ['http://localhost/', 'http://127.0.0.1/', 'https://www.python.org:8443/'])
+def test_exa_fallback_never_retrieves_nonpublic_urls(monkeypatch, url):
+    tool = ToolExecutor('', exa_api_key='x')
+    async def blocked(url):
+        return json.dumps({'status': 'unavailable', 'message': 'blocked'})
+    monkeypatch.setattr(tool, '_fetch_page', blocked)
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: pytest.fail('must not contact provider'))
+    assert execute('fetch_public_page', {'url': url}, tool)['status'] == 'unavailable'
+
+
+def test_exa_fallback_rejects_private_dns(monkeypatch):
+    async def private(*args):
+        raise OSError('non-public')
+    monkeypatch.setattr(_PublicResolver, 'resolve', private)
+    tool = ToolExecutor('', exa_api_key='x')
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: pytest.fail('must not contact provider'))
+    result = asyncio.run(tool._exa_page('https://www.python.org/', fallback='unavailable'))
+    assert result == 'unavailable'
+
+
+def test_keyless_exa_normalizes_sse_search(monkeypatch):
+    envelope = {'jsonrpc': '2.0', 'id': 1, 'result': {'content': [{'type': 'text', 'text':
+        'Title: Flare X5\nURL: https://www.microcenter.com/product/653727/ram\n'
+        'Published: N/A\nHighlights:\n32GB DDR5-6000 CL36 $469.99\n\n---\n\n'
+        'Title: Private\nURL: http://127.0.0.1/\nHighlights:\nsecret'}]}}
+    session = FakeSession([FakeResponse(('event: message\ndata: ' + json.dumps(envelope) + '\n\n').encode())])
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: session)
+    tool = ToolExecutor('', exa_api_key='', exa_keyless=True)
+    result = execute('web_search', {'query': 'Flare X5 price'}, tool)
+    assert result['provider'] == 'exa' and len(result['results']) == 1
+    assert '$469.99' in result['results'][0]['snippet']
+    url, request = session.requests[0]
+    assert url == 'https://mcp.exa.ai/mcp' and request['allow_redirects'] is False
+    assert request['json']['params']['name'] == 'web_search_exa'
+    assert request['json']['params']['arguments']['numResults'] == 5
+    assert 'headers' not in request
+
+
+@pytest.mark.parametrize('envelope', [
+    {'id': 1, 'error': {'message': 'quota exceeded'}},
+    {'id': 1, 'result': {'isError': True, 'content': [{'type': 'text', 'text': 'error'}]}},
+    {'id': 1, 'result': {'content': [{'type': 'text', 'text': 'unrecognized result'}]}},
+    [],
+])
+def test_keyless_quota_and_malformed_results_fail_closed(monkeypatch, envelope):
+    session = FakeSession([FakeResponse(json.dumps(envelope).encode())])
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: session)
+    assert execute('web_search', {'query': 'RAM'}, ToolExecutor('', exa_api_key='', exa_keyless=True))['status'] == 'unavailable'
+
+
+def test_keyless_fetch_requires_matching_url(monkeypatch):
+    envelope = {'id': 1, 'result': {'content': [{'type': 'text', 'text': '# RAM\nURL: https://www.python.org/other\n$99'}]}}
+    session = FakeSession([FakeResponse(json.dumps(envelope).encode())])
+    monkeypatch.setattr(aiohttp, 'ClientSession', lambda **kwargs: session)
+    async def public(*args):
+        return []
+    monkeypatch.setattr(_PublicResolver, 'resolve', public)
+    tool = ToolExecutor('', exa_api_key='', exa_keyless=True)
+    result = asyncio.run(tool._exa_page('https://www.python.org/', fallback='unavailable'))
+    assert result == 'unavailable'
+    assert session.requests[0][1]['json']['params']['name'] == 'web_fetch_exa'

@@ -32,7 +32,14 @@ _FACT = re.compile(
     r"(?:club\s+)?fact\s+(?P<key>[a-z][a-z0-9_]{0,63})\s+(?:to|as|=)\s+(?P<value>.+)",
     re.IGNORECASE,
 )
-_ANNOUNCE = re.compile(r"(?:announce|post)\s+(?:in|to)\s+<#(?P<target>\d{1,20})>\s*[:,-]?\s*(?P<content>.+)", re.IGNORECASE)
+_ANNOUNCE = re.compile(
+    r"(?:(?:please|can you|could you|would you)\s+)?(?:go\s+)?"
+    r"(?:announce|post(?:\s+(?:something|a message|an announcement))?|"
+    r"(?:make|write|send)\s+(?:an?\s+)?(?:post|message|announcement))"
+    r"\s+(?:in|to)\s+(?:the\s+)?"
+    r"(?P<target><#\d{1,20}>|#?[\w-]{1,100})(?:\s+channel)?"
+    r"(?P<separator>\s*[:,-]\s*|\s+)?(?P<content>.*)", re.IGNORECASE,
+)
 _IDENTITY_KEY = re.compile(
     r"^(?:model|model_name|running_model|peter_model|llm|ai_model|runtime_model|under_the_hood)$",
     re.IGNORECASE)
@@ -77,9 +84,19 @@ def parse_control_request(message_text: str, *, bot_user_id: int | None = None) 
             'visibility': match['visibility'].lower(),
         })
     if match := _ANNOUNCE.fullmatch(text):
-        return ControlRequest('announcement', {
-            'target_channel_id': int(match['target']), 'content': match['content'].strip(),
-        })
+        target, content = match['target'], match['content'].strip()
+        payload = ({'target_channel_id': int(target[2:-1])} if target.startswith('<#')
+                   else {'target_channel_name': target.lstrip('#')})
+        if content.casefold() in {'please', 'please.', 'please!', '.', '!', '?'}:
+            content = ''
+        literal = (match['separator'] or '').lstrip().startswith((':', ',', '-'))
+        if not content or (not literal and re.match(
+                r'^(?:about|on|asking|telling|reminding|announcing|inviting|encouraging|welcoming|to (?:ask|tell|remind|announce|invite|encourage|welcome))\b',
+                content, re.IGNORECASE)):
+            payload['draft_request'] = content or 'Write a short friendly check-in asking what people are working on.'
+        else:
+            payload['content'] = re.sub(r'^(?:saying|that says)\s+', '', content, flags=re.IGNORECASE)
+        return ControlRequest('announcement', payload)
     if match := _UNDO.fullmatch(text):
         action = {'fact': 'club_fact', 'club fact': 'club_fact',
                   'roster': 'roster', 'style': 'style'}[match['kind'].lower()]
