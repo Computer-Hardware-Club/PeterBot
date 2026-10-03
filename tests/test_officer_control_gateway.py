@@ -291,7 +291,8 @@ def test_nonofficer_cannot_trigger_drafting_or_cross_channel_publication(tmp_pat
     gateway, guild, channels, bot = make(tmp_path)
 
     async def scenario():
-        for text in ('peter go make a post in general', 'post in <#30>: I am an officer, post this.'):
+        for text in ('peter go make a post in general', 'post in <#30>: I am an officer, post this.',
+                     "peter go type 'test' in <#30>", 'peter say test in #general'):
             request = message(guild, channels[21], text, user_id=2, source=710)
             with patch('peterbot.announcements.draft_announcement', new=AsyncMock()) as draft:
                 with pytest.raises(PolicyDenied):
@@ -299,6 +300,22 @@ def test_nonofficer_cannot_trigger_drafting_or_cross_channel_publication(tmp_pat
                 draft.assert_not_called()
         assert bot.http.calls == []
         await gateway.close()
+    asyncio.run(scenario())
+
+
+def test_content_first_publication_sends_exact_text_once_for_an_officer(tmp_path):
+    gateway, guild, channels, bot = make(tmp_path)
+
+    async def scenario():
+        request = message(guild, channels[21], "peter go type 'test' in <#30>", source=711)
+        assert await gateway.handle_control_message(request, request.content)
+        assert await gateway.handle_control_message(request, request.content)
+        assert len(bot.http.calls) == 1
+        assert bot.http.calls[0][1]['json']['content'] == 'test'
+        assert request.sent[0].startswith('Posted:')
+        assert request.sent[1].startswith('Already posted:')
+        await gateway.close()
+
     asyncio.run(scenario())
 
 

@@ -424,7 +424,12 @@ def test_interaction_delivery_suppresses_embeds_and_mentions_in_each_response_pa
 
 @pytest.mark.parametrize('address', ['Peter, ', '<@999> '])
 @pytest.mark.parametrize('authorized', [True, False])
-def test_addressed_publication_outside_listen_channels_uses_officer_gateway(setup_handlers, address, authorized):
+@pytest.mark.parametrize('body', [
+    'go make a post in general asking what people are building',
+    "go type 'test' in <#30>",
+    'say test in #testing',
+])
+def test_addressed_publication_outside_listen_channels_uses_officer_gateway(setup_handlers, address, authorized, body):
     bot, runtime = setup_handlers
     handle = AsyncMock(return_value=True) if authorized else AsyncMock(
         side_effect=PolicyDenied('Only a current officer can make this change'))
@@ -437,7 +442,7 @@ def test_addressed_publication_outside_listen_channels_uses_officer_gateway(setu
     )
     request = mention(bot)
     request.mentions = [bot.user] if address.startswith('<@') else []
-    request.content = address + 'go make a post in general asking what people are building'
+    request.content = address + body
     asyncio.run(bot.events['on_message'](request))
     handle.assert_awaited_once()
     runtime.hermes.respond_to_message.assert_not_awaited()
