@@ -578,3 +578,53 @@ def test_handoff_still_wins_for_genuine_research_and_ordinary_chat_answers():
     assert handed is None
     direct, _ = run({'content': 'A capacitor stores charge.'}, 'what is a capacitor?')
     assert direct == 'A capacitor stores charge.'
+
+
+@pytest.mark.parametrize(('prefix', 'tail'), [
+    ('Since the vectors are dependent, choose a_j ≠ 0. Then x ∈ span{v',
+     '₁, …, v̂ⱼ, …, vₙ}. Both containments hold.'),
+    ('The answer is ', 'forty two.'),
+    ('The answer is', ' forty two.'),
+    ('Start of the proof.\n\n', '**Conclusion:** the spans are equal.'),
+    ('This is linearly depen', 'dent.'),
+    ('```python\nprint(', '42)\n```'),
+    ('x', 'x + 1'),
+])
+def test_clean_continuation_preserves_answer_start_and_exact_boundary(prefix, tail):
+    session = UpstreamSession()
+    session.results = [
+        {'choices': [{'message': {'content': prefix, 'reasoning_content': 'private reasoning'},
+                      'finish_reason': 'length'}]},
+        {'choices': [{'message': {'content': tail}, 'finish_reason': 'stop'}]},
+    ]
+    answer = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)),
+                                            'prove the spans are equal', []))
+    assert answer == prefix + tail
+    assert 'private reasoning' not in answer
+    assert session.calls[1][1]['json']['messages'][-2]['content'] == prefix
+
+
+def test_truncated_continuation_does_not_replace_prior_partial_answer():
+    prefix = 'The vectors are dependent, so some coefficient a_j is nonzero. '
+    tail = 'Rearrange the dependence relation to express v_j as a combination of the others.'
+    session = UpstreamSession()
+    session.results = [
+        {'choices': [{'message': {'content': prefix}, 'finish_reason': 'length'}]},
+        {'choices': [{'message': {'content': tail}, 'finish_reason': 'length'}]},
+    ]
+    answer = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)),
+                                            'prove the spans are equal', []))
+    assert answer == prefix + tail
+
+
+def test_rescue_that_repeats_full_prefix_is_not_duplicated():
+    prefix = 'Choose a nonzero dependence coefficient. '
+    complete = prefix + 'Then remove that vector without changing the span.'
+    session = UpstreamSession()
+    session.results = [
+        {'choices': [{'message': {'content': prefix}, 'finish_reason': 'length'}]},
+        {'choices': [{'message': {'content': complete}, 'finish_reason': 'stop'}]},
+    ]
+    answer = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)),
+                                            'prove the spans are equal', []))
+    assert answer == complete
