@@ -99,3 +99,14 @@ def test_control_intent_rejects_forged_or_unknown_actions():
         ControlIntent(10, 1, 20, 500, "change_policy")
     with pytest.raises(ValueError):
         ControlIntent(10, 1, 20, 0, "style")
+
+
+def test_only_posting_is_allowed_from_any_officer_source_channel():
+    configured = policy()
+    officer = Principal(10, 1, 21, (100,))
+    intent = ControlIntent(10, 1, 21, 500, 'announcement')
+    configured.require_control(officer, intent, channel_is_private=False)
+    with pytest.raises(PolicyDenied):
+        configured.require_control(Principal(10, 1, 21), intent, channel_is_private=False)
+    with pytest.raises(PolicyDenied):
+        configured.require_control(officer, ControlIntent(10, 1, 21, 500, 'style'), channel_is_private=False)

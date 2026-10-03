@@ -76,7 +76,7 @@ async def read_attachments(attachments) -> list[dict]:
     allowed={'.txt','.md','.csv','.tsv','.json','.py','.js','.ts','.html','.css','.yaml','.yml','.toml','.xml','.log'}
     for index,attachment in enumerate(attachments):
         if attachment.size>131072 or Path(attachment.filename).suffix.lower() not in allowed:
-            raise ValueError('This pilot accepts text/code attachments totaling at most 128 KiB. Images and binary documents are not enabled yet.')
+            raise ValueError('Text/code attachments must total at most 128 KiB. Other binary documents are not supported.')
         data=await attachment.read()
         total+=len(data)
         if total>131072:
@@ -123,7 +123,8 @@ class HermesGateway:
         self.projects = ProjectStore(state_dir / 'projects')
         self.metrics = MetricStore(state_dir / 'metrics.sqlite3')
         self.outbox = AnnouncementOutbox(state_dir / 'announcements.sqlite3', self.policy,
-            {guild_id: settings.announcement_destination_ids for guild_id in settings.allowed_guild_ids})
+            {guild_id: settings.announcement_destination_ids for guild_id in settings.allowed_guild_ids},
+            allow_guild_destinations=True)
         self.tools = ToolExecutor(config.agent.search_base_url)
         # PETER-13: exact public releases only, image-cache-first, hash-verified.
         self.packages = PackageBroker(getattr(settings, 'package_cache_dir', IMAGE_DEP_CACHE))
@@ -205,7 +206,7 @@ class HermesGateway:
         return 'private' if private else 'public'
 
     async def conversational_reply(self, principal, prompt, context, *, audience='public',
-                                   has_attachments=False, budget_seconds=None):
+                                   has_attachments=False, budget_seconds=None, image_context=None):
         from .conversation import reply_or_use_tools
         started = time.monotonic()
         outcome = 'failed'
@@ -223,7 +224,8 @@ class HermesGateway:
                                               club_context=facts, club_notes=club_notes,
                                               style_instruction=voice,
                                               has_attachments=has_attachments,
-                                              budget_seconds=budget_seconds)
+                                              budget_seconds=budget_seconds,
+                                              image_context=image_context)
             outcome = 'ok'
             return answer
         finally:
@@ -286,10 +288,49 @@ class HermesGateway:
             resolved.append(OfficeAssignment(request.office, member.id, member.display_name))
         return tuple(resolved)
 
+    async def _announcement_target(self, principal, payload):
+        """Resolve a real channel and verify both actor and bot access, without model authority."""
+        guild = self.bot.get_guild(principal.guild_id)
+        if guild is None:
+            raise PolicyDenied('I cannot verify this server right now.')
+        target_id = payload.get('target_channel_id')
+        if target_id is None:
+            channels = await guild.fetch_channels()
+            name = payload['target_channel_name'].casefold()
+            matches = [channel for channel in channels if channel.name.casefold() == name]
+            if len(matches) != 1:
+                raise ValueError('I could not find one channel with that name. Use its exact #channel mention.')
+            target_id = matches[0].id
+        target = await self.bot.fetch_channel(target_id)
+        if getattr(getattr(target, 'guild', None), 'id', None) != principal.guild_id:
+            raise PolicyDenied('That destination is not in this server.')
+        if getattr(target, 'type', None) not in (discord.ChannelType.text, discord.ChannelType.news,
+                                               discord.ChannelType.public_thread,
+                                               discord.ChannelType.private_thread,
+                                               discord.ChannelType.news_thread):
+            raise PolicyDenied('Choose a text channel or an existing thread for that post.')
+        actor = await guild.fetch_member(principal.user_id)
+        bot_member = await guild.fetch_member(self.bot.user.id)
+        actor_permissions = target.permissions_for(actor)
+        bot_permissions = target.permissions_for(bot_member)
+        thread = isinstance(target, discord.Thread)
+        send_permission = 'send_messages_in_threads' if thread else 'send_messages'
+        if (not actor_permissions.view_channel or not bot_permissions.view_channel
+                or not getattr(actor_permissions, send_permission, False)
+                or not getattr(bot_permissions, send_permission, False)):
+            raise PolicyDenied('Both you and Peter need access to post in that destination.')
+        if thread:
+            if target.archived or target.locked:
+                raise PolicyDenied('Choose an active, unlocked thread for that post.')
+            if target.is_private():
+                await target.fetch_member(actor.id)
+                await target.fetch_member(bot_member.id)
+        return target
+
     async def handle_control_message(self, message, prompt: str) -> bool:
         """Apply one clear original officer instruction, never tool or page text."""
         from .context import send_chunked_reply
-        request = parse_control_request(prompt)
+        request = parse_control_request(prompt, bot_user_id=getattr(self.bot.user, 'id', None))
         if request is None:
             return False
         p, intent, private = await self._control_source(message, request.action)
@@ -335,9 +376,22 @@ class HermesGateway:
                     updates=dict(proposal.updates), expected_version=current['version'])
                 receipt = f"got it, i'll use that next turn (v{result['version']})"
         elif request.action == 'announcement':
-            target_id = request.payload['target_channel_id']
+            previous = self.outbox.for_source(p, intent, channel_is_private=private)
+            target = await self._announcement_target(p, request.payload)
+            target_id = target.id
+            content = request.payload.get('content')
+            if content is None:
+                if previous is not None:
+                    content = previous['content']
+                else:
+                    from .announcements import draft_announcement
+                    facts, _ = self.club.chat_context(p.guild_id, request.payload['draft_request'],
+                                                      static_chunks=self.knowledge.chunks)
+                    content = await draft_announcement(self.session, self.config,
+                        request=request.payload['draft_request'], channel_name=target.name,
+                        public_facts=facts)
             record = self.outbox.propose(p, intent, target_channel_id=target_id,
-                content=request.payload['content'], channel_is_private=private)
+                content=content, channel_is_private=private)
             if record['status'] == 'sent':
                 receipt = f"Already posted: {self.outbox.receipt_url(record['id'])}"
             elif record['status'] in ('unknown', 'sending'):
@@ -345,16 +399,8 @@ class HermesGateway:
             elif record['status'] in ('denied', 'failed'):
                 receipt = 'That announcement request is closed. Send a new clear request if it is still needed.'
             else:
-                target = await self.bot.fetch_channel(target_id)
-                if getattr(getattr(target, 'guild', None), 'id', None) != p.guild_id:
-                    self.outbox.mark_denied(record['id'])
-                    raise PolicyDenied('That destination is not in this server.')
-                try:
-                    bot_member = await target.guild.fetch_member(self.bot.user.id)
-                except discord.HTTPException as exc:
-                    raise PolicyDenied('I cannot verify my access to that destination.') from exc
-                if not target.permissions_for(bot_member).send_messages:
-                    raise PolicyDenied('I cannot post in that destination.')
+                # Recheck channel permissions after any draft generation delay.
+                target = await self._announcement_target(p, {'target_channel_id': target_id})
                 # Re-fetch the actor immediately before the external side effect.
                 p, intent, private = await self._control_source(message, 'announcement')
                 if not self.outbox.begin_send(record['id'], p, intent,
@@ -452,7 +498,8 @@ class HermesGateway:
             raise
 
     async def respond_to_message(self, message, prompt):
-        from .context import get_recent_channel_entries, send_chunked_reply, split_for_discord
+        from .context import get_recent_channel_entries, send_chunked_reply, split_for_discord, is_image_attachment
+        from .vision import collect_images, describe_images, IMAGE_FAILURE
         from .presence import Presence
         from .prompts import simple_greeting_reply
         request_limit = getattr(getattr(self.config, 'agent', None), 'request_timeout_seconds', None)
@@ -463,6 +510,24 @@ class HermesGateway:
         if greeting is not None:
             await send_chunked_reply(message, greeting)
             return
+        attachments = list(message.attachments)
+        image_context = []
+        async with message.channel.typing():
+            images = await collect_images(message,
+                limit=getattr(self.config, 'mention_image_limit', 2),
+                max_bytes=getattr(self.config, 'mention_max_image_bytes', 5 * 1024 * 1024),
+                history_limit=getattr(self.config, 'mention_context_fetch_limit', 40))
+            if any(is_image_attachment(item) for item in attachments) and not images:
+                await send_chunked_reply(message, IMAGE_FAILURE)
+                return
+            if images:
+                try:
+                    observations = await describe_images(self.session, self.config, images, question=prompt)
+                    image_context = [{'role': 'user', 'content': observations}]
+                except ValueError as exc:
+                    await send_chunked_reply(message, str(exc))
+                    return
+                attachments = [item for item in attachments if not is_image_attachment(item)]
         # A natural follow-up inside the owner's own private task thread is a
         # continuation of that task, not a fresh chat turn: the thread
         # membership itself is the binding. `latest_for_thread` only matches
@@ -476,8 +541,8 @@ class HermesGateway:
                     "cancel requested. i'll keep any valid files")
                 return
             await self.submit(guild_id=p.guild_id, user_id=p.user_id, channel=message.channel,
-                source_message_id=message.id, prompt=prompt, attachments=message.attachments,
-                parent_id=thread_job['id'])
+                source_message_id=message.id, prompt=prompt, attachments=attachments,
+                parent_id=thread_job['id'], context=image_context)
             return
         # Social context can include other speakers. It never enters the sandbox.
         context=await get_recent_channel_entries(message.channel,bot_user_id=self.bot.user.id,
@@ -487,10 +552,11 @@ class HermesGateway:
         presence=Presence(message.channel,reply_to=message,max_chars=self.config.max_discord_message_chars)
         async with message.channel.typing(), presence:
             audience = self.conversation_audience(message.channel, self.settings.control_channel_ids)
-            answer = None if message.attachments else await self.conversational_reply(
+            answer = None if attachments else await self.conversational_reply(
                 p,prompt,context,audience=audience,
                 has_attachments=bool(message.attachments),
-                budget_seconds=max(0.0, turn_deadline-time.monotonic()) if turn_deadline else None)
+                budget_seconds=max(0.0, turn_deadline-time.monotonic()) if turn_deadline else None,
+                image_context=image_context)
         if answer is not None:
             # Refresh access after inference before responding.
             await self.principal(p.guild_id,p.user_id,p.channel_id)
@@ -514,14 +580,14 @@ class HermesGateway:
         own_ids={entry.get('message_id') for entry in context if entry.get('author_id')==p.user_id}
         own_context=[{'role':entry.get('role','user'),'content':entry.get('content','')} for entry in context
             if entry.get('author_id')==p.user_id or (entry.get('author_id')==self.bot.user.id and entry.get('reply_to_message_id') in own_ids)]
-        context=self.jobs.conversation_context(p.guild_id,p.user_id,p.channel_id)+own_context
+        context=self.jobs.conversation_context(p.guild_id,p.user_id,p.channel_id)+own_context+image_context
         self.require_work_access(p)
         # This is real work in another process for minutes: say so now, in the message
         # that will later hold the answer.
         await presence.show('*pondering* (0s)', force=True)
         try:
             await self.submit(guild_id=p.guild_id,user_id=p.user_id,channel=message.channel,
-                source_message_id=message.id,prompt=prompt,attachments=message.attachments,
+                source_message_id=message.id,prompt=prompt,attachments=attachments,
                 in_channel=True,context=context,status_message_id=presence.message_id)
         except (ValueError, PolicyDenied) as exc:
             if not await presence.finish(str(exc)):
@@ -918,6 +984,20 @@ class HermesGateway:
             if time.monotonic() - self.last_submit.get(user_id,0) < 10:
                 raise ValueError('Give me a few seconds before submitting another task.')
             self.jobs.check_capacity(user_id)
+            from .context import is_image_attachment
+            from .vision import collect_images, describe_images, IMAGE_FAILURE
+            image_attachments = [item for item in attachments if is_image_attachment(item)]
+            if image_attachments:
+                from types import SimpleNamespace
+                images = await collect_images(SimpleNamespace(attachments=image_attachments,
+                    id=source_message_id, author=SimpleNamespace(display_name=str(user_id))),
+                    limit=getattr(self.config, 'mention_image_limit', 2),
+                    max_bytes=getattr(self.config, 'mention_max_image_bytes', 5 * 1024 * 1024))
+                if not images:
+                    raise ValueError(IMAGE_FAILURE)
+                observations = await describe_images(self.session, self.config, images, question=prompt)
+                context = list(context or []) + [{'role': 'user', 'content': observations}]
+                attachments = [item for item in attachments if not is_image_attachment(item)]
             input_files = await read_attachments(attachments)
             self.last_submit[user_id] = time.monotonic()
             if in_channel:
@@ -949,7 +1029,7 @@ class HermesGateway:
                     input_files=json.loads(old.get('input_files','[]'))
                 job = self.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel.id,
                     source_message_id=source_message_id,prompt=prompt,parent_id=parent_id,input_files=input_files,
-                    ingress=(guild_id,source_message_id),project_id=project_id)
+                    ingress=(guild_id,source_message_id),project_id=project_id,context=context)
                 self._admit_task_envelope(job)
                 return job
             if not isinstance(channel, discord.TextChannel):
@@ -966,7 +1046,7 @@ class HermesGateway:
                 raise
             job = self.jobs.create(guild_id=guild_id,user_id=user_id,channel_id=channel.id,
                 source_message_id=source_message_id,prompt=prompt,parent_id=parent_id,input_files=input_files,
-                ready=False,ingress=(guild_id,source_message_id))
+                ready=False,ingress=(guild_id,source_message_id),context=context)
             # The job stays `preparing` while the acknowledgement send is in
             # flight: the queue must not see it until the thread promise has
             # actually reached the user, and `preparing` is neither claimable
@@ -1186,10 +1266,10 @@ class HermesGateway:
             self.require_work_access(p)
             previous = self.jobs.get(job['parent_id']) if job['parent_id'] else None
             conversational=job.get('delivery_mode','private')=='channel'
-            prior = json.loads(job.get('context','[]')) if conversational else []
+            prior = json.loads(job.get('context','[]'))
             if not conversational and previous and previous['user_id']==job['user_id'] and previous['guild_id']==job['guild_id']:
                 prior = [{'role':'user','content':previous['prompt']},
-                         {'role':'assistant','content':previous['answer'] or 'Previous run was interrupted; verify before repeating actions.'}]
+                         {'role':'assistant','content':previous['answer'] or 'Previous run was interrupted; verify before repeating actions.'}] + prior
             project_files = None
             if job.get('project_id'):
                 self.projects.check_access(p, job['project_id'])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import mimetypes
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -225,7 +226,9 @@ async def load_mention_image_payloads(
 
         if not data or len(data) > max_bytes:
             continue
-        content_type = getattr(attachment, "content_type", "") or "image/jpeg"
+        content_type = (getattr(attachment, "content_type", "") or "").split(";", 1)[0]
+        if not content_type.startswith("image/"):
+            content_type = mimetypes.guess_type(getattr(attachment, "filename", ""))[0] or "image/jpeg"
         images.append(f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}")
     return images
 
