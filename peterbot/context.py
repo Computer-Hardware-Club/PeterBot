@@ -289,6 +289,8 @@ def format_context_message(
     content = entry["content"]
     if entry["role"] == "user":
         content = f"{entry['author_name']}: {content}"
+    if entry["created_at"] is not None:
+        content = f"[{entry['created_at'].isoformat()}] {content}"
     return {"role": entry["role"], "content": content}
 
 

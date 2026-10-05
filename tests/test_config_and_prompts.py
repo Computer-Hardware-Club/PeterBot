@@ -390,3 +390,13 @@ def test_custom_persona_seed_cannot_override_hard_style_rules(tmp_path) -> None:
     assert "super warm best friend who acts human" in prompt
     assert "You are the club bot or assistant, not a human member of the server." in prompt
     assert "Do not ask a follow up question unless clarification is actually required." in prompt
+
+
+def test_channel_history_defaults_allow_twenty_full_discord_messages(tmp_path, monkeypatch):
+    monkeypatch.setenv('DISCORD_TOKEN', 'test-token')
+    payload = build_config_payload(tmp_path)
+    payload['behavior'].pop('channel_context_limit')
+    payload['behavior'].pop('max_context_message_chars')
+    config = AppConfig.load(str(write_config(tmp_path, payload)))
+    assert config.channel_context_limit == 20
+    assert config.max_context_message_chars == 4000

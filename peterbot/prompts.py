@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from .config import AppConfig, ModelProfile
 from .knowledge import ChannelProfile, KnowledgeChunk, build_knowledge_excerpt
@@ -9,6 +11,27 @@ from .knowledge import ChannelProfile, KnowledgeChunk, build_knowledge_excerpt
 CHAT_MODE = "chat"
 MENTION_MODE = "mention"
 RECAP_MODE = "recap"
+
+
+def current_time_context(now: Optional[datetime] = None) -> str:
+    """Trusted request-time clock, independent of the server's local timezone."""
+    now = datetime.now(timezone.utc) if now is None else now
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("Current time must be timezone-aware")
+    utc_now = now.astimezone(timezone.utc)
+    club_now = utc_now.astimezone(ZoneInfo("America/Los_Angeles"))
+    return (
+        "Current date and approximate time (trusted server clock at request start):\n"
+        f"- UTC: {utc_now.isoformat(sep=' ', timespec='minutes')} (UTC).\n"
+        f"- Club local time: {club_now.isoformat(sep=' ', timespec='minutes')} "
+        f"(America/Los_Angeles, {club_now.tzname()}).\n"
+        "Use this clock and message timestamps to judge how old conversation is. "
+        "Interpret relative dates such as today or tomorrow in the club's local timezone "
+        "unless the user specifies another timezone. In historical messages, relative dates "
+        "refer to when that message was sent, not the current date. "
+        "Older messages may still be relevant; ignore stale conversation when it does not "
+        "help answer the current request. Do not assume an old event or plan is still current."
+    )
 
 
 def build_context_line(
@@ -116,6 +139,7 @@ def build_system_prompt(
     blocks = [
         config.peter_system_prompt.strip(),
         f"Identity: Your name is {config.peter_name}.{context_line}",
+        current_time_context(),
         "Style rules:\n" + "\n".join(f"- {rule}" for rule in profile_style_rules(config.model_profile)),
         "Task rules:\n" + "\n".join(f"- {rule}" for rule in mode_specific_rules(mode)),
     ]

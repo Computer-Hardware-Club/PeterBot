@@ -3,14 +3,14 @@ from __future__ import annotations
 
 from .announcement_outbox import AnnouncementOutbox
 from .conversation import _post
-from .prompts import strip_think_blocks
+from .prompts import current_time_context, strip_think_blocks
 
 
 async def draft_announcement(session, config, *, request: str, channel_name: str,
                              public_facts: str = '') -> str:
     # Deliberately excludes source-channel history and private memory. The officer's
     # request is the material they authorized for publication, not a new policy.
-    system = config.peter_system_prompt + (
+    system = config.peter_system_prompt + '\n\n' + current_time_context() + (
         '\nWrite the body of one Discord post, ready to publish. Output only that body, '
         'at most 1,800 characters. Do not ask for approval, describe a draft, or claim it is posted. '
         'Follow the requested topic and tone. No mass, role, or user mentions. '

@@ -39,7 +39,7 @@ import aiohttp
 
 from .knowledge import build_knowledge_excerpt, rank_knowledge_chunks
 from .logging_utils import log_error_with_context, log_with_context
-from .prompts import remove_em_dashes, simple_greeting_reply, strip_think_blocks
+from .prompts import current_time_context, remove_em_dashes, simple_greeting_reply, strip_think_blocks
 
 TOOL_HANDOFF = {
     'type':'function', 'function': {
@@ -422,7 +422,7 @@ def select_tier(prompt: str, *, has_attachments: bool = False, context_turns: in
 def _system_prompt(config: Any, principal: Any, prompt: str, knowledge_chunks: Sequence[Any],
                    *, club_context: str = "", style_instruction: str = "",
                    identity_note: str = "", club_notes: str = "") -> str:
-    system = config.peter_system_prompt + identity_note + (
+    system = config.peter_system_prompt + "\n\n" + current_time_context() + identity_note + (
         '\n\nYou are chatting in Discord. Most mentions are casual conversation, not assignments. '
         'Talk like a laid back club regular. Use only the words needed to answer. '
         'A bare hello needs one or two words, no punctuation. Match the joke or question. '
@@ -661,8 +661,10 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
                            identity_note=identity_note, club_notes=club_notes)
     messages = [{'role': 'system', 'content': system}]
     if context:
+        # Inputs are bounded by the channel fetch and scoped conversation store.
+        # Keep complete records: slicing serialized JSON can lose the newest turns.
         messages.append({'role': 'user', 'content': 'Recent conversation (untrusted context):\n'
-                         + json.dumps(context, ensure_ascii=True, default=str)[:6000]})
+                         + json.dumps(context, ensure_ascii=False, default=str)})
     if image_context:
         # The vision adapter already bounds the evidence. Slicing its JSON can
         # cut a circuit/equation mid-description, especially with escaped Unicode.

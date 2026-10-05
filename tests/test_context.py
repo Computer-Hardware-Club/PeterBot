@@ -211,3 +211,18 @@ def test_load_mention_image_payloads_skips_unreadable_images() -> None:
 
     payloads = asyncio.run(load_mention_image_payloads(message, limit=2, max_bytes=10))
     assert payloads == []
+
+
+def test_ask_history_preserves_timestamps_for_people_and_peter():
+    from datetime import timezone
+    from peterbot.context import get_channel_context_messages
+    stamp = datetime(2026, 9, 1, 12, 30, tzinfo=timezone.utc)
+    async def history(**kwargs):
+        for user_id in (999, 1):
+            yield SimpleNamespace(id=user_id, author=SimpleNamespace(
+                id=user_id, bot=user_id == 999, display_name='Peter' if user_id == 999 else 'Member'),
+                content='Old conversation', created_at=stamp, attachments=[], embeds=[], reference=None)
+    result = asyncio.run(get_channel_context_messages(
+        SimpleNamespace(history=history), bot_user_id=999, peter_name='Peter', limit=20))
+    assert [row['role'] for row in result] == ['user', 'assistant']
+    assert all('[2026-09-01T12:30:00+00:00]' in row['content'] for row in result)

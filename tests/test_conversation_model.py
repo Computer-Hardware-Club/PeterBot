@@ -628,3 +628,24 @@ def test_rescue_that_repeats_full_prefix_is_not_duplicated():
     answer = asyncio.run(reply_or_use_tools(session, config(), Principal(10, 1, 20, (100,)),
                                             'prove the spans are equal', []))
     assert answer == complete
+
+
+def test_full_timestamped_channel_history_survives_large_saved_context():
+    saved = [{'role': 'user', 'content': 'older saved exchange ' + 'x' * 7900}]
+    channel = [{'message_id': index, 'author_name': f'Speaker {index}',
+                'role': 'user', 'created_at': datetime(2026, 9, 1 + index, tzinfo=timezone.utc),
+                'content': f'message {index} ' + '電' * 3990}
+               for index in range(20)]
+    _, calls = run({'content': 'I can see the latest discussion.'}, context=saved + channel)
+    messages = calls[0][1]['json']['messages']
+    encoded = messages[1]['content'].split('\n', 1)[1]
+    delivered = json.loads(encoded)
+    assert len(delivered) == 21
+    assert delivered[0] == saved[0]
+    for expected, actual in zip(channel, delivered[1:]):
+        assert actual['message_id'] == expected['message_id']
+        assert actual['content'] == expected['content']
+        assert actual['created_at'] == str(expected['created_at'])
+    assert messages[-1]['content'] == "how's it going?"
+    assert 'Current' in messages[0]['content']
+    assert 'America/Los_Angeles' in messages[0]['content']

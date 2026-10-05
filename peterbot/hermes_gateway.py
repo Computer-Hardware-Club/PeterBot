@@ -35,7 +35,7 @@ from .ops_metrics import MAX_DURATION_MS, MetricStore
 from .project_store import ProjectDenied, ProjectError, ProjectStore, ProjectViolation
 from .package_access import IMAGE_DEP_CACHE, PACKAGE_TASK_BYTES, PackageBroker, PackageError
 from .tools import ToolExecutor
-from .prompts import strip_think_blocks
+from .prompts import current_time_context, strip_think_blocks
 from .style_state import StyleStore, propose_style_change
 
 # A per-task model call serializes its peers instead of failing them instantly: a client
@@ -440,7 +440,7 @@ class HermesGateway:
         facts, _version = self.club.chat_context(guild_id, prompt[:300],
                                                  static_chunks=self.knowledge.chunks,
                                                  max_chars=KNOWLEDGE_EXCERPT_CHARS)
-        persona = self.config.peter_system_prompt
+        persona = self.config.peter_system_prompt + "\n\n" + current_time_context()
         if facts:
             persona += ('\n\nCurrent authoritative club facts (public):\n' + facts)
         if self.style.current(guild_id)['version']:
@@ -546,7 +546,9 @@ class HermesGateway:
             return
         # Social context can include other speakers. It never enters the sandbox.
         context=await get_recent_channel_entries(message.channel,bot_user_id=self.bot.user.id,
-            peter_name=self.config.peter_name,limit=8,before=message.created_at,max_chars=500)
+            peter_name=self.config.peter_name,
+            limit=getattr(self.config, "channel_context_limit", 20), before=message.created_at,
+            max_chars=getattr(self.config, "max_context_message_chars", 4000))
         # Typing is refreshed by discord.py for the life of the context, so a slow turn
         # only needs something to *say*; a quick one says nothing at all.
         presence=Presence(message.channel,reply_to=message,max_chars=self.config.max_discord_message_chars)
@@ -578,7 +580,9 @@ class HermesGateway:
                     log.exception('Delivered conversation turn could not be recorded')
             return
         own_ids={entry.get('message_id') for entry in context if entry.get('author_id')==p.user_id}
-        own_context=[{'role':entry.get('role','user'),'content':entry.get('content','')} for entry in context
+        own_context=[{'role':entry.get('role','user'),
+            'content': (f"[Sent at {entry['created_at'].isoformat()}] " if entry.get('created_at') else '')
+                       + entry.get('content','')} for entry in context
             if entry.get('author_id')==p.user_id or (entry.get('author_id')==self.bot.user.id and entry.get('reply_to_message_id') in own_ids)]
         context=self.jobs.conversation_context(p.guild_id,p.user_id,p.channel_id)+own_context+image_context
         self.require_work_access(p)

@@ -69,3 +69,14 @@ def test_unknown_future_schema_is_rejected(tmp_path):
     store.db.close()
     with pytest.raises(ValueError, match="newer"):
         ConversationStore(str(path))
+
+
+def test_saved_turns_keep_original_storage_time(tmp_path):
+    store = ConversationStore(str(tmp_path / 'conversation.sqlite3'))
+    add(store, 1, prompt='old topic', answer='old reply')
+    stamp = '2026-09-01T12:30:00+00:00'
+    with store.db:
+        store.db.execute('UPDATE conversation_turns SET created_at=?', (stamp,))
+    result = context(store)
+    assert len(result) == 2
+    assert all(row['saved_at'] == stamp for row in result)

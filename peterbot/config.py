@@ -302,14 +302,14 @@ class LoggingConfig:
 class BehaviorConfig:
     max_discord_message_chars: int = 1800
     max_log_context_chars: int = 320
-    channel_context_limit: int = 8
+    channel_context_limit: int = 20
     mention_context_fetch_limit: int = 40
     mention_focus_message_limit: int = 6
     mention_active_gap_minutes: int = 10
     mention_max_background_age_minutes: int = 45
     mention_image_limit: int = 2
     mention_max_image_bytes: int = 5 * 1024 * 1024
-    max_context_message_chars: int = 500
+    max_context_message_chars: int = 4000
     mention_assistant_tail_limit: int = 2
     recap_default_messages: int = 25
     recap_max_messages: int = 40
@@ -504,7 +504,7 @@ class AppConfig:
                     minimum=1,
                 ),
                 max_log_context_chars=_int_or_default(behavior_section, "max_log_context_chars", 320, minimum=1),
-                channel_context_limit=_int_or_default(behavior_section, "channel_context_limit", 8, minimum=1),
+                channel_context_limit=_int_or_default(behavior_section, "channel_context_limit", 20, minimum=1),
                 mention_context_fetch_limit=_int_or_default(
                     behavior_section,
                     "mention_context_fetch_limit",
@@ -539,7 +539,7 @@ class AppConfig:
                 max_context_message_chars=_int_or_default(
                     behavior_section,
                     "max_context_message_chars",
-                    500,
+                    4000,
                     minimum=1,
                 ),
                 mention_assistant_tail_limit=_int_or_default(

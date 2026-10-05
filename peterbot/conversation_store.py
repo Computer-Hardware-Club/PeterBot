@@ -96,7 +96,7 @@ class ConversationStore:
             raise ValueError("Invalid conversation scope")
         if not 500 <= max_chars <= MAX_CONTEXT_CHARS:
             raise ValueError("Invalid context limit")
-        rows = list(self.db.execute("""SELECT prompt,answer FROM conversation_turns
+        rows = list(self.db.execute("""SELECT prompt,answer,created_at FROM conversation_turns
             WHERE guild_id=? AND user_id=? AND channel_id=? AND audience=?
             ORDER BY created_at DESC,source_message_id DESC LIMIT 64""",
             (guild_id,user_id,channel_id,audience)))
@@ -106,12 +106,14 @@ class ConversationStore:
         pinned: list[str] = []
         for row in rows:
             for line in _constraints(row["prompt"]):
-                if line not in pinned and sum(map(len, pinned)) + len(line) <= MAX_PINNED_CHARS:
-                    pinned.append(line)
+                stamped_line = f"[{row['created_at']}] {line}"
+                if (not any(item.endswith("] " + line) for item in pinned)
+                        and sum(map(len, pinned)) + len(stamped_line) <= MAX_PINNED_CHARS):
+                    pinned.append(stamped_line)
         selected = rows[-MAX_CONTEXT_TURNS:]
         prefix: list[dict[str, str]] = []
         if rows[0] not in selected:
-            content = "Original request (verbatim excerpt): " + rows[0]["prompt"][:1000]
+            content = f"Original request at {rows[0]['created_at']} (verbatim excerpt): " + rows[0]["prompt"][:1000]
             prefix.append({"role": "user", "content": content[:max_chars // 5]})
         if pinned:
             content = "Earlier explicit user constraints (verbatim): " + json.dumps(pinned, ensure_ascii=False)
@@ -126,8 +128,8 @@ class ConversationStore:
             prompt_limit = min(2000, max(50, remaining // 2))
             prompt = row["prompt"][:prompt_limit]
             answer = row["answer"][:min(2000, remaining - len(prompt))]
-            recent[0:0] = [{"role": "user", "content": prompt},
-                            {"role": "assistant", "content": answer}]
+            recent[0:0] = [{"role": "user", "content": prompt, "saved_at": row["created_at"]},
+                            {"role": "assistant", "content": answer, "saved_at": row["created_at"]}]
             remaining -= len(prompt) + len(answer)
         return prefix + recent
 

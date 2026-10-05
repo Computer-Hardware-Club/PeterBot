@@ -399,3 +399,60 @@ def test_rescued_proof_delivers_and_saves_every_chunk_in_order(tmp_path):
             assert saved['answer'] == prefix + tail
             assert saved['delivery_cursor'] == len(delivered)
     asyncio.run(scenario())
+
+
+def test_channel_reply_fetches_twenty_timestamped_messages(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            gateway.config.channel_context_limit = 20
+            gateway.config.max_context_message_chars = 4000
+            current_time = datetime(2026, 10, 5, 18, tzinfo=timezone.utc)
+            older_time = datetime(2026, 8, 1, 18, tzinfo=timezone.utc)
+            async def history(**kwargs):
+                assert kwargs == {'limit': 20, 'before': current_time, 'oldest_first': False}
+                for index in reversed(range(20)):
+                    yield SimpleNamespace(id=index + 1, author=SimpleNamespace(
+                        id=2, bot=False, display_name='Member'), content=f'entry {index} ' + 'x' * 3000,
+                        attachments=[], embeds=[], reference=None, created_at=older_time)
+            channel.history = history
+            gateway.conversational_reply = AsyncMock(return_value='Got the context.')
+            message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
+                author=SimpleNamespace(id=1, display_name='Officer', bot=False),
+                content='Peter, what were we talking about?', attachments=[], reference=None,
+                reply=AsyncMock(), created_at=current_time)
+            # Image lookup has its own independent history limit.
+            with patch('peterbot.vision.collect_images', new=AsyncMock(return_value=[])):
+                await gateway.respond_to_message(message, 'what were we talking about?')
+            context = gateway.conversational_reply.await_args.args[2]
+            assert len(context) == 20
+            assert [item['message_id'] for item in context] == list(range(1, 21))
+            assert all(item['created_at'] == older_time for item in context)
+            assert all(len(item['content']) > 3000 for item in context)
+    asyncio.run(scenario())
+
+
+def test_work_handoff_keeps_timestamps_without_bystander_history(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            stamp = datetime(2026, 8, 1, 18, tzinfo=timezone.utc)
+            entries = [
+                {'message_id': 1, 'author_id': 1, 'role': 'user', 'content': 'my old question', 'created_at': stamp},
+                {'message_id': 2, 'author_id': 999, 'role': 'assistant', 'content': 'old answer',
+                 'reply_to_message_id': 1, 'created_at': stamp},
+                {'message_id': 3, 'author_id': 2, 'role': 'user', 'content': 'bystander private text', 'created_at': stamp},
+            ]
+            gateway.conversational_reply = AsyncMock(return_value=None)
+            gateway.submit = AsyncMock()
+            channel.send.return_value = SimpleNamespace(id=777, edit=AsyncMock())
+            message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
+                author=SimpleNamespace(id=1, display_name='Officer', bot=False),
+                attachments=[], reply=AsyncMock(), created_at=datetime.now(timezone.utc))
+            with patch('peterbot.vision.collect_images', new=AsyncMock(return_value=[])), \
+                 patch('peterbot.context.get_recent_channel_entries', new=AsyncMock(return_value=entries)):
+                await gateway.respond_to_message(message, 'research my earlier question')
+            context = gateway.submit.await_args.kwargs['context']
+            assert len(context) == 2
+            assert all('[Sent at 2026-08-01T18:00:00+00:00]' in row['content'] for row in context)
+            assert 'bystander private text' not in str(context)
+            assert 'America/Los_Angeles' in gateway.club_persona(10, 'research')
+    asyncio.run(scenario())
