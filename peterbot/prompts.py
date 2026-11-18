@@ -12,6 +12,12 @@ CHAT_MODE = "chat"
 MENTION_MODE = "mention"
 RECAP_MODE = "recap"
 
+HISTORY_TIMESTAMP_PREFIX = re.compile(
+    r"\A(?:\s*\[(?:Sent at )?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\])+",
+    re.IGNORECASE,
+)
+
 
 def current_time_context(now: Optional[datetime] = None) -> str:
     """Trusted request-time clock, independent of the server's local timezone."""
@@ -29,9 +35,15 @@ def current_time_context(now: Optional[datetime] = None) -> str:
         "Interpret relative dates such as today or tomorrow in the club's local timezone "
         "unless the user specifies another timezone. In historical messages, relative dates "
         "refer to when that message was sent, not the current date. "
+        "Message timestamps are context. Start your reply with the answer and omit any sent-at label. "
         "Older messages may still be relevant; ignore stale conversation when it does not "
         "help answer the current request. Do not assume an old event or plan is still current."
     )
+
+
+def strip_history_timestamp(text: str) -> str:
+    """Remove a leading transcript timestamp, preserving the answer's own dates."""
+    return HISTORY_TIMESTAMP_PREFIX.sub("", text)
 
 
 def build_context_line(
@@ -418,7 +430,7 @@ def trim_chat_paragraphs(text: str) -> str:
 
 
 def cleanup_response_text(text: str, *, profile: ModelProfile, mode: str = CHAT_MODE) -> str:
-    cleaned = strip_think_blocks(text or "")
+    cleaned = strip_history_timestamp(strip_think_blocks(text or "")).lstrip()
     cleaned = remove_canned_openers(cleaned)
     cleaned = remove_laughter_filler(cleaned)
     cleaned = remove_canned_signoffs(cleaned)

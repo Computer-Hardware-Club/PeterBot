@@ -35,7 +35,7 @@ from .ops_metrics import MAX_DURATION_MS, MetricStore
 from .project_store import ProjectDenied, ProjectError, ProjectStore, ProjectViolation
 from .package_access import IMAGE_DEP_CACHE, PACKAGE_TASK_BYTES, PackageBroker, PackageError
 from .tools import ToolExecutor
-from .prompts import current_time_context, strip_think_blocks
+from .prompts import current_time_context, strip_history_timestamp, strip_think_blocks
 from .style_state import StyleStore, propose_style_change
 
 # A per-task model call serializes its peers instead of failing them instantly: a client
@@ -552,55 +552,63 @@ class HermesGateway:
         # Typing is refreshed by discord.py for the life of the context, so a slow turn
         # only needs something to *say*; a quick one says nothing at all.
         presence=Presence(message.channel,reply_to=message,max_chars=self.config.max_discord_message_chars)
-        async with message.channel.typing(), presence:
-            audience = self.conversation_audience(message.channel, self.settings.control_channel_ids)
-            answer = None if attachments else await self.conversational_reply(
-                p,prompt,context,audience=audience,
-                has_attachments=bool(message.attachments),
-                budget_seconds=max(0.0, turn_deadline-time.monotonic()) if turn_deadline else None,
-                image_context=image_context)
-        if answer is not None:
-            # Refresh access after inference before responding.
-            await self.principal(p.guild_id,p.user_id,p.channel_id)
-            if len(split_for_discord(answer, max_len=self.config.max_discord_message_chars)) > 1:
-                delivery = self.jobs.record_fast_answer(guild_id=p.guild_id,user_id=p.user_id,
-                    channel_id=p.channel_id,source_message_id=message.id,
-                    prompt=prompt,answer=answer,status_message_id=presence.message_id)
-                await self.deliver(delivery)
-                return
-            delivered = await presence.finish(answer)
-            if not delivered and not presence.partial_delivery:
-                delivered = await send_chunked_reply(message,answer)
-            if delivered:
-                try:
-                    self.conversations.append_turn(guild_id=p.guild_id,user_id=p.user_id,
-                        channel_id=p.channel_id,source_message_id=message.id,
-                        audience=audience,prompt=prompt,answer=answer)
-                except Exception:
-                    log.exception('Delivered conversation turn could not be recorded')
-            return
-        own_ids={entry.get('message_id') for entry in context if entry.get('author_id')==p.user_id}
-        own_context=[{'role':entry.get('role','user'),
-            'content': (f"[Sent at {entry['created_at'].isoformat()}] " if entry.get('created_at') else '')
-                       + entry.get('content','')} for entry in context
-            if entry.get('author_id')==p.user_id or (entry.get('author_id')==self.bot.user.id and entry.get('reply_to_message_id') in own_ids)]
-        context=self.jobs.conversation_context(p.guild_id,p.user_id,p.channel_id)+own_context+image_context
-        self.require_work_access(p)
-        # This is real work in another process for minutes: say so now, in the message
-        # that will later hold the answer.
-        await presence.show('*pondering* (0s)', force=True)
+        status_transferred = False
         try:
-            await self.submit(guild_id=p.guild_id,user_id=p.user_id,channel=message.channel,
-                source_message_id=message.id,prompt=prompt,attachments=attachments,
-                in_channel=True,context=context,status_message_id=presence.message_id)
-        except (ValueError, PolicyDenied) as exc:
-            if not await presence.finish(str(exc)):
-                await send_chunked_reply(message, str(exc))
-        except Exception:
-            log.exception('Conversation work admission failed')
-            text = 'I could not start that work. Try me again in a moment.'
-            if not await presence.finish(text):
-                await send_chunked_reply(message, text)
+            async with message.channel.typing(), presence:
+                audience = self.conversation_audience(message.channel, self.settings.control_channel_ids)
+                answer = None if attachments else await self.conversational_reply(
+                    p,prompt,context,audience=audience,
+                    has_attachments=bool(message.attachments),
+                    budget_seconds=max(0.0, turn_deadline-time.monotonic()) if turn_deadline else None,
+                    image_context=image_context)
+            if answer is not None:
+                # Refresh access after inference before responding.
+                await self.principal(p.guild_id,p.user_id,p.channel_id)
+                if len(split_for_discord(answer, max_len=self.config.max_discord_message_chars)) > 1:
+                    delivery = self.jobs.record_fast_answer(guild_id=p.guild_id,user_id=p.user_id,
+                        channel_id=p.channel_id,source_message_id=message.id,
+                        prompt=prompt,answer=answer,status_message_id=presence.message_id)
+                    status_transferred = True
+                    await self.deliver(delivery)
+                    return
+                delivered = await presence.finish(answer)
+                if not delivered and not presence.partial_delivery:
+                    delivered = await send_chunked_reply(message,answer)
+                if delivered:
+                    try:
+                        self.conversations.append_turn(guild_id=p.guild_id,user_id=p.user_id,
+                            channel_id=p.channel_id,source_message_id=message.id,
+                            audience=audience,prompt=prompt,answer=answer)
+                    except Exception:
+                        log.exception('Delivered conversation turn could not be recorded')
+                return
+            own_ids={entry.get('message_id') for entry in context if entry.get('author_id')==p.user_id}
+            own_context=[{'role':entry.get('role','user'),
+                'content': (f"[Sent at {entry['created_at'].isoformat()}] " if entry.get('created_at') else '')
+                           + entry.get('content','')} for entry in context
+                if entry.get('author_id')==p.user_id or (entry.get('author_id')==self.bot.user.id and entry.get('reply_to_message_id') in own_ids)]
+            context=self.jobs.conversation_context(p.guild_id,p.user_id,p.channel_id)+own_context+image_context
+            self.require_work_access(p)
+            # This is real work in another process for minutes: say so now, in the message
+            # that will later hold the answer.
+            await presence.show('*pondering* (0s)', force=True)
+            try:
+                await self.submit(guild_id=p.guild_id,user_id=p.user_id,channel=message.channel,
+                    source_message_id=message.id,prompt=prompt,attachments=attachments,
+                    in_channel=True,context=context,status_message_id=presence.message_id)
+            except (ValueError, PolicyDenied) as exc:
+                if not await presence.finish(str(exc)) and not presence.partial_delivery:
+                    await send_chunked_reply(message, str(exc))
+            except Exception:
+                log.exception('Conversation work admission failed')
+                text = 'I could not start that work. Try me again in a moment.'
+                if not await presence.finish(text) and not presence.partial_delivery:
+                    await send_chunked_reply(message, text)
+            else:
+                status_transferred = True
+        finally:
+            if not status_transferred:
+                await presence.discard()
 
     async def start(self):
         if self.loop_task is not None:
@@ -1319,7 +1327,8 @@ class HermesGateway:
                 # without it a failure is indistinguishable from any other.
                 log.warning('Hermes task failed: job=%s status=%s error_code=%s', job['id'], status,
                             result.get('error_code', 'unspecified'))
-            answer = strip_think_blocks(str(result.get('answer','No final answer was returned.')))
+            answer = strip_history_timestamp(
+                strip_think_blocks(str(result.get('answer','No final answer was returned.')))).strip()
             if result.get('project_files'):
                 try:
                     still_running = self.jobs.get(job['id'])['status'] == 'running'
@@ -1384,6 +1393,7 @@ class HermesGateway:
             text = attachment_answer(fresh['answer'], fresh['artifacts'])
             conversational = fresh.get('delivery_mode', 'private') == 'channel'
             from .context import split_for_discord
+            from .presence import Presence
             parts = [('text', chunk) for chunk in split_for_discord(text, 1800)]
             try:
                 for artifact in json.loads(fresh['artifacts'])[:3]:
@@ -1427,6 +1437,7 @@ class HermesGateway:
                                 # A rate limit or server error keeps its own receipt state.
                                 if getattr(error, 'status', None) not in (403, 404):
                                     raise
+                                await Presence.adopt(channel, status_message).discard()
                             else:
                                 receipt_id = int(status_message_id)
                     if receipt_id is None:

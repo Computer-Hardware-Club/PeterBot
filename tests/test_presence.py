@@ -30,6 +30,10 @@ class FakeMessage:
         self.content = content
         self.edits = []
         self.fail_edits = False
+        self.deleted = False
+
+    async def delete(self):
+        self.deleted = True
 
     async def edit(self, *, content=None, **kwargs):
         if self.fail_edits:
@@ -100,6 +104,33 @@ def test_slow_turn_shows_a_status_line_and_then_becomes_the_answer():
     assert message.content == 'KEC 1005, Fridays at 6.'
 
 
+def test_turn_ending_during_a_status_send_waits_for_the_discord_receipt():
+    async def scenario():
+        channel = FakeChannel()
+        accepted = asyncio.Event()
+        receipt = asyncio.Event()
+        original_send = channel.send
+
+        async def delayed_receipt(*args, **kwargs):
+            message = await original_send(*args, **kwargs)
+            accepted.set()
+            await receipt.wait()
+            return message
+
+        channel.send = delayed_receipt
+        presence = Presence(channel, status_after=0)
+        async with presence:
+            await asyncio.wait_for(accepted.wait(), timeout=1)
+            asyncio.get_running_loop().call_soon(receipt.set)
+        assert await presence.finish('Here is the answer.')
+        await presence.discard()
+        assert len(channel.sent) == 1
+        assert presence.message.content == 'Here is the answer.'
+        assert not presence.message.deleted
+
+    run(scenario())
+
+
 def test_long_answer_edits_the_first_chunk_and_sends_the_rest():
     async def scenario():
         channel = FakeChannel()
@@ -142,12 +173,15 @@ def test_a_deleted_or_uneditable_message_never_breaks_the_turn():
         presence = Presence(channel, status_after=0)
         async with presence:
             await asyncio.sleep(0.01)
-            presence.message.fail_edits = True
+            posted = presence.message
+            posted.fail_edits = True
             await presence.show('update')          # does not raise
             delivered = await presence.finish('answer')  # falls back to the caller
-        return delivered
+        return posted, delivered
 
-    assert run(scenario()) is False
+    posted, delivered = run(scenario())
+    assert delivered is False
+    assert posted.deleted
 
 
 def test_a_failed_status_post_never_breaks_the_turn():
@@ -326,6 +360,21 @@ def test_delivery_falls_back_to_a_new_message_when_the_status_message_is_gone(tm
     channel, job = run(scenario())
     assert [sent[0] for sent in channel.sent] == ['Here is the program.']
     assert job['delivered'] == 1
+
+
+def test_delivery_discards_an_uneditable_status_before_sending_the_answer(tmp_path):
+    async def scenario():
+        channel = FakeChannel()
+        status = await channel.send('still working')
+        status.fail_edits = True
+        async with gateway_with_channel(tmp_path, channel) as gateway:
+            job = channel_job(gateway, status_message_id=status.id)
+            await gateway.deliver(job)
+            assert status.deleted
+            assert [sent[0] for sent in channel.sent] == ['still working', 'Here is the program.']
+            assert gateway.jobs.get(job['id'])['delivered'] == 1
+
+    run(scenario())
 
 
 def test_delivery_sends_artifacts_after_the_status_message_becomes_the_answer(tmp_path):

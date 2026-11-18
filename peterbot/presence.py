@@ -64,10 +64,12 @@ class Presence:
         self.max_chars = max_chars
         self.message: Optional[Any] = None
         self._poster: Optional[asyncio.Task] = None
+        self._stop_poster = asyncio.Event()
         self._last_edit = 0.0
         self._last_text = ''
         self._started_at = self.now()
         self.partial_delivery = False
+        self._answered = False
 
     @property
     def message_id(self) -> Optional[int]:
@@ -93,15 +95,15 @@ class Presence:
     async def begin(self) -> None:
         """Start the delayed poster. Harmless to call once per turn."""
         if self._poster is None:
+            self._stop_poster.clear()
             self._poster = asyncio.create_task(self._post_later())
 
     async def end(self) -> None:
         if self._poster is not None:
-            self._poster.cancel()
-            try:
-                await self._poster
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - never let cleanup raise
-                pass
+            # Stop the delay, but collect the receipt if Discord is already
+            # handling the send. Cancelling there can orphan a visible message.
+            self._stop_poster.set()
+            await asyncio.shield(self._poster)
             self._poster = None
 
     async def __aenter__(self) -> 'Presence':
@@ -114,7 +116,13 @@ class Presence:
 
     async def _post_later(self) -> None:
         try:
-            await asyncio.sleep(self.status_after)
+            async with asyncio.timeout(self.status_after):
+                await self._stop_poster.wait()
+        except TimeoutError:
+            pass
+        if self._stop_poster.is_set():
+            return
+        try:
             await self.show(progress_text('working', self.now() - self._started_at))
         except asyncio.CancelledError:
             raise
@@ -149,6 +157,19 @@ class Presence:
                              error='HTTPException')
         return self.message
 
+    async def discard(self) -> None:
+        """Best-effort removal of a status that never became an answer."""
+        await self.end()
+        if self.message is None or self._answered:
+            return
+        message, self.message = self.message, None
+        try:
+            await message.delete()
+        except discord.NotFound:
+            pass
+        except Exception:
+            log_with_context(logging.WARNING, 'Could not remove the working status message')
+
     async def finish(self, text: str) -> bool:
         """Turn the status message into the answer. Returns True if it delivered it.
 
@@ -156,6 +177,7 @@ class Presence:
         case ``partial_delivery`` is true and callers must not replay the first
         chunk. Long replies normally use the durable delivery cursor instead.
         """
+        await self.end()
         chunks = split_for_discord(text, self.max_chars)
         if self.message is None or not chunks:
             return False
@@ -166,7 +188,9 @@ class Presence:
             # has to reach the member, so let the caller deliver it normally.
             log_with_context(logging.WARNING, 'Could not turn the working message into the answer',
                              error='HTTPException')
+            await self.discard()
             return False
+        self._answered = True
         self._last_text = chunks[0]
         for chunk in chunks[1:]:
             try:

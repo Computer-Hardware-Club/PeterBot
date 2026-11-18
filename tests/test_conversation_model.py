@@ -52,6 +52,12 @@ def test_model_prose_never_returns_an_em_dash():
     assert result == 'That works, send it over.'
 
 
+def test_reply_drops_an_echoed_sent_at_label_but_keeps_dates_in_the_answer():
+    result, _ = run({'content': ' [Sent at 2026-11-18T00:38:22.638000+00:00]\n'
+                               'The log says [2026-11-18T01:00:00Z].'})
+    assert result == 'The log says [2026-11-18T01:00:00Z].'
+
+
 def test_greeting_gets_one_fast_non_thinking_attempt_without_the_4096_allowance():
     result, calls = run({'content': 'Only on Tuesdays.'}, 'hey Peter, what\'s up?',
                         context=[{'created_at': datetime.now(timezone.utc), 'content': 'toaster?'}])

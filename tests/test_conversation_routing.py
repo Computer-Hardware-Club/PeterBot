@@ -4,6 +4,7 @@ import json
 import time
 from contextlib import asynccontextmanager, nullcontext
 from datetime import datetime, timezone
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -12,6 +13,7 @@ import pytest
 from peterbot.agent_policy import PolicyDenied, Principal
 from peterbot.hermes_gateway import Capability, HermesGateway
 from peterbot.hermes_settings import HermesSettings
+from peterbot.presence import Presence
 from test_hermes_gateway import UpstreamSession
 from test_command_admission import interaction, mention, setup_handlers
 import peterbot.commands as handlers
@@ -180,8 +182,12 @@ def test_worker_request_scopes_memory_and_suppresses_public_status(tmp_path, pub
             job = gateway.jobs.create(guild_id=10, user_id=1, channel_id=20, source_message_id=30,
                                       prompt="Help", delivery_mode="channel" if public else "private")
             gateway.jobs.update(job["id"], status="running")
-            gateway.session.result = {"status": "completed", "answer": "The answer."}
+            gateway.session.result = {
+                "status": "completed",
+                "answer": "[Sent at 2026-11-18T00:38:22.638000+00:00] The answer.",
+            }
             await gateway.run_job(job)
+            assert gateway.jobs.get(job["id"])["answer"] == "The answer."
             payload = next(kwargs["json"]["request"] for url, kwargs in gateway.session.calls if url.endswith("/run"))
             assert "public club fact" in json.dumps(payload["memory_snapshots"])
             assert ("private secret" in json.dumps(payload)) is not public
@@ -190,6 +196,31 @@ def test_worker_request_scopes_memory_and_suppresses_public_status(tmp_path, pub
                 channel.send.assert_not_awaited()
             else:
                 assert channel.send.await_count >= 1
+    asyncio.run(scenario())
+
+
+def test_model_failure_removes_the_pending_status_before_bubbling_up(tmp_path):
+    async def scenario():
+        async with conversation_gateway(tmp_path) as (gateway, channel):
+            status_posted = asyncio.Event()
+            status = SimpleNamespace(id=777, delete=AsyncMock())
+
+            async def send(*args, **kwargs):
+                status_posted.set()
+                return status
+
+            async def fail(*args, **kwargs):
+                await asyncio.wait_for(status_posted.wait(), timeout=1)
+                raise ValueError("The model is unavailable.")
+
+            channel.send.side_effect = send
+            gateway.conversational_reply = fail
+            message = SimpleNamespace(id=30, guild=channel.guild, channel=channel,
+                author=SimpleNamespace(id=1), attachments=[], created_at=datetime.now(timezone.utc))
+            with patch('peterbot.presence.Presence', new=partial(Presence, status_after=0)):
+                with pytest.raises(ValueError, match="model is unavailable"):
+                    await gateway.respond_to_message(message, "Does that make sense?")
+            status.delete.assert_awaited_once_with()
     asyncio.run(scenario())
 
 

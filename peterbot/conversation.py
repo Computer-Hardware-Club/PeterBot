@@ -39,7 +39,8 @@ import aiohttp
 
 from .knowledge import build_knowledge_excerpt, rank_knowledge_chunks
 from .logging_utils import log_error_with_context, log_with_context
-from .prompts import current_time_context, remove_em_dashes, simple_greeting_reply, strip_think_blocks
+from .prompts import (current_time_context, remove_em_dashes, simple_greeting_reply,
+                      strip_history_timestamp, strip_think_blocks)
 
 TOOL_HANDOFF = {
     'type':'function', 'function': {
@@ -579,15 +580,15 @@ def _decode(message: dict, finish: Optional[str]) -> tuple[str, str]:
     authorizes the sandbox — the gateway re-checks authority on every handoff anyway,
     but a wobble must not *become* a handoff decision on its own.
     """
+    visible = strip_history_timestamp(strip_think_blocks(message.get('content') or '', strip_edges=False))
     calls = message.get('tool_calls') or []
     if not calls:
-        answer = strip_think_blocks(message.get('content') or '').strip()
-        if not answer:
+        if not visible.strip():
             return RETRY, ''
         if finish not in (None, 'stop'):
             # Truncated, filtered, or otherwise abnormal: the text may stop mid-sentence.
-            return RETRY, ''
-        return ANSWER, answer
+            return RETRY, visible
+        return ANSWER, visible
     # A tool call only counts when the stream says it completed: 'tool_calls' is the
     # OpenAI-shaped marker, 'stop' is what some vLLM tool parsers emit. A missing
     # marker or 'length' means the arguments may have been cut off mid-call.
@@ -607,7 +608,7 @@ def _decode(message: dict, finish: Optional[str]) -> tuple[str, str]:
     log_with_context(logging.WARNING, 'Malformed conversation tool decision; retrying without handoff',
                      tool_names=[str(call.get('function', {}).get('name'))[:40] for call in calls][:5],
                      finish_reason=finish)
-    return RETRY, ''
+    return RETRY, visible
 
 
 def _attempt_budget(remaining: float, profile: dict, rescue_follows: bool) -> float:
@@ -717,15 +718,14 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
             continue
         choice = (data.get('choices') or [{}])[0]
         message = choice.get('message') or {}
-        kind, text = _decode(message, choice.get('finish_reason'))
+        kind, visible = _decode(message, choice.get('finish_reason'))
         if kind == ANSWER:
             if requires_tool_result(prompt):
                 log_with_context(logging.WARNING,
                                  'Explicit deliverable or execution request answered without tools; handing off',
                                  prompt_chars=len(prompt))
                 return None
-            visible = strip_think_blocks(message.get('content') or '', strip_edges=False)
-            answer = remove_em_dashes(_continue_answer(partial_answer, visible).strip())
+            answer = remove_em_dashes(strip_history_timestamp(_continue_answer(partial_answer, visible)).strip())
             if identity_turn:
                 # The served model has repeatedly claimed Claude and argued with an
                 # officer's correction: a stale self-claim on an identity turn is
@@ -736,9 +736,8 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
             return None
         # Blank or truncated: keep any real text so the rescue can continue it instead
         # of restarting. Reasoning text is never kept and never shown.
-        arrived = strip_think_blocks(message.get('content') or '', strip_edges=False)
-        if arrived.strip():
-            partial_answer = _continue_answer(partial_answer, arrived)
+        if visible.strip():
+            partial_answer = _continue_answer(partial_answer, visible)
 
     if transport_failed and not partial_answer:
         log_error_with_context('Conversation model did not answer on any attempt', attempts=attempts,
@@ -749,7 +748,7 @@ async def reply_or_use_tools(session: Any, config: Any, principal: Any, prompt: 
         # Truncated text the model actually wrote beats a canned line for the member.
         log_with_context(logging.WARNING, 'Conversation answer delivered without a clean finish',
                          tier=tier, attempts=attempts, answer_chars=len(partial_answer))
-        return remove_em_dashes(partial_answer.strip())
+        return remove_em_dashes(strip_history_timestamp(partial_answer).strip())
     log_error_with_context('Conversation model returned no usable answer', attempts=attempts, tier=tier,
                            model=str(getattr(config.inference, 'model', '')), prompt_chars=len(prompt))
     return BLANK_ANSWER_REPLY
